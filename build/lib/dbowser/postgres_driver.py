@@ -199,8 +199,7 @@ async def list_rows(
     _validate_identifier(table_name, "table")
     where_sql = f" WHERE {where_clause}" if where_clause else ""
     query = (
-        f'SELECT * FROM "{schema_name}"."{table_name}"'
-        f"{where_sql} LIMIT $1 OFFSET $2"
+        f'SELECT * FROM "{schema_name}"."{table_name}"{where_sql} LIMIT $1 OFFSET $2'
     )
     async with _open_connection(connection_parameters) as connection:
         statement = await connection.prepare(query)

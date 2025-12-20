@@ -34,9 +34,6 @@ def main() -> None:
         return
 
     config = load_config()
-    if not config.connections:
-        raise ValueError("No saved connections found. Use 'dbowser add-connection'.")
-
     app = DatabaseBrowserApp(
         config,
         initial_connection_name=args.conn,

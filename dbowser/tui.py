@@ -19,7 +19,12 @@ from textual.widgets import (
 )
 from textual.widgets._input import Selection
 
-from dbowser.config import AppConfig, ConnectionConfig
+from dbowser.config import (
+    add_connection,
+    AppConfig,
+    ConnectionConfig,
+    save_config,
+)
 
 from dbowser.postgres_driver import (
     ConnectionParameters,
@@ -149,6 +154,30 @@ class DatabaseBrowserApp(App):
     #error-message {
         text-wrap: wrap;
     }
+
+    #add-connection-dialog {
+        width: 70%;
+        max-width: 90;
+        height: auto;
+        max-height: 70%;
+        padding: 1 2;
+        background: rgb(20, 24, 30);
+        border: heavy rgb(80, 120, 180);
+        color: rgb(230, 240, 255);
+        align: center middle;
+    }
+
+    AddConnectionDialog {
+        align: center middle;
+    }
+
+    #add-connection-title {
+        text-style: bold;
+    }
+
+    #add-connection-error {
+        color: rgb(255, 150, 150);
+    }
     """
 
     BINDINGS = [
@@ -162,6 +191,7 @@ class DatabaseBrowserApp(App):
         ("p", "previous_page", "Prev Page"),
         ("G", "cursor_bottom", "Bottom"),
         ("ctrl+p", "enter_palette_mode", "Palette"),
+        ("a", "add_connection", "Add Connection"),
         ("w", "enter_where_mode", "Where"),
         ("o", "enter_order_mode", "Order"),
         ("/", "enter_filter_mode", "Filter"),
@@ -178,8 +208,7 @@ class DatabaseBrowserApp(App):
         initial_schema_name: str | None = None,
     ) -> None:
         super().__init__()
-        if not config.connections:
-            raise ValueError("No saved connections found. Use 'dbowser add-connection'.")
+        self._config = config
         self._connections = config.connections
         self._connection_parameters: ConnectionParameters | None = None
         self._selected_connection_name = ""
@@ -212,6 +241,7 @@ class DatabaseBrowserApp(App):
         self._rows_where_clause = ""
         self._rows_order_by_clause = ""
         self._error_dialog_open = False
+        self._pending_connection_dialog = False
         self._resource_filters: dict[str, str] = {
             "connection": "",
             "database": "",
@@ -246,8 +276,10 @@ class DatabaseBrowserApp(App):
         command_input = self.query_one("#command-input", Input)
         command_input.display = False
         self._update_keybinds()
-        if self._initial_connection_name:
+        if self._connections and self._initial_connection_name:
             await self._apply_initial_selection()
+        if not self._connections:
+            self._open_add_connection_dialog()
 
     async def action_select_resource(self) -> None:
         if self._input_mode:
@@ -275,6 +307,11 @@ class DatabaseBrowserApp(App):
 
     def action_enter_palette_mode(self) -> None:
         self._enter_input_mode("palette")
+
+    def action_add_connection(self) -> None:
+        if self._current_view != "connection":
+            return
+        self._open_add_connection_dialog()
 
     def action_enter_where_mode(self) -> None:
         if self._current_view != "rows":
@@ -955,6 +992,26 @@ class DatabaseBrowserApp(App):
                 return connection
         raise ValueError(f"Unknown connection: {connection_name}")
 
+    def _open_add_connection_dialog(self) -> None:
+        if self._pending_connection_dialog:
+            return
+        self._pending_connection_dialog = True
+        self.push_screen(AddConnectionDialog(), self._handle_add_connection_result)
+
+    def _handle_add_connection_result(self, result: ConnectionConfig | None) -> None:
+        self._pending_connection_dialog = False
+        if result is None:
+            return
+        try:
+            updated = add_connection(self._config, result)
+        except Exception as error:
+            self._show_error_dialog("Failed to add connection", error)
+            return
+        save_config(updated)
+        self._config = updated
+        self._connections = updated.connections
+        self.call_later(self._refresh_view)
+
     async def _apply_initial_selection(self) -> None:
         try:
             await self._select_connection_by_name(self._initial_connection_name)
@@ -1057,6 +1114,13 @@ class DatabaseBrowserApp(App):
                 + [("^p", "Palette")]
             )
 
+        if self._current_view == "connection":
+            return (
+                base
+                + movement
+                + [("a", "Add"), ("/", "Filter"), ("enter", "Select"), ("^p", "Palette")]
+            )
+
         return base + movement + [("/", "Filter"), ("enter", "Select"), ("^p", "Palette")]
 
     def _format_cell_value(self, value: object) -> str:
@@ -1128,6 +1192,50 @@ class CellDetailScreen(ModalScreen[None]):
 class KeyBindingBar(Static):
     def __init__(self) -> None:
         super().__init__("", markup=True)
+
+
+class AddConnectionDialog(ModalScreen[ConnectionConfig | None]):
+    BINDINGS = [
+        ("q", "dismiss", "Close"),
+        ("escape", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="add-connection-dialog"):
+            yield Static("Add Connection", id="add-connection-title")
+            yield Static("Name", id="add-connection-name-label")
+            yield Input(placeholder="prod", id="add-connection-name")
+            yield Static("URL", id="add-connection-url-label")
+            yield Input(
+                placeholder="postgresql://user:pass@host:5432/postgres",
+                id="add-connection-url",
+            )
+            yield Static("", id="add-connection-error")
+
+    def on_mount(self) -> None:
+        self.focus()
+        self.query_one("#add-connection-name", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "add-connection-name":
+            self.query_one("#add-connection-url", Input).focus()
+            return
+        if event.input.id != "add-connection-url":
+            return
+        name = self.query_one("#add-connection-name", Input).value.strip()
+        url = self.query_one("#add-connection-url", Input).value.strip()
+        if not name or not url:
+            self.query_one("#add-connection-error", Static).update(
+                "Name and URL are required."
+            )
+            return
+        self.dismiss(ConnectionConfig(name=name, url=url))
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#add-connection-url", Input).focus()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#add-connection-name", Input).focus()
 
 
 class ErrorDialog(ModalScreen[None]):

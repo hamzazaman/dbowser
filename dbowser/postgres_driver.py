@@ -1,7 +1,5 @@
-import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-import os
 import re
 from typing import AsyncIterator, Iterable
 from urllib.parse import urlparse
@@ -23,6 +21,7 @@ class ConnectionParameters:
     username: str
     password: str
     database_name: str
+    restricted_database_name: str
 
 
 _pools: dict[ConnectionParameters, Pool] = {}
@@ -53,13 +52,15 @@ class RowPage:
     has_more: bool
 
 
-def _load_connection_url() -> str:
-    return os.environ["DBOWSER_CONN_URL"]
-
-
 def _parse_connection_parameters(connection_url: str) -> ConnectionParameters:
     parsed_url = urlparse(connection_url)
-    database_name = parsed_url.path.lstrip("/") or "postgres"
+    parsed_path = parsed_url.path.lstrip("/")
+    if parsed_path:
+        database_name = parsed_path.split("/", 1)[0]
+        restricted_database_name = database_name
+    else:
+        database_name = "postgres"
+        restricted_database_name = ""
     if parsed_url.hostname is None:
         raise ValueError("Missing required connection field: host")
     if parsed_url.username is None:
@@ -73,6 +74,7 @@ def _parse_connection_parameters(connection_url: str) -> ConnectionParameters:
         username=parsed_url.username,
         password=parsed_url.password,
         database_name=database_name,
+        restricted_database_name=restricted_database_name,
     )
 
 
@@ -144,21 +146,13 @@ def _prompt_for_database_selection(databases: Iterable[DatabaseInfo]) -> Databas
     return database_list[selection - 1]
 
 
-def load_connection_parameters_from_env() -> ConnectionParameters:
-    connection_url = _load_connection_url()
-    return _parse_connection_parameters(connection_url)
-
-
 async def list_databases(
     connection_parameters: ConnectionParameters,
 ) -> list[DatabaseInfo]:
+    if connection_parameters.restricted_database_name:
+        return [DatabaseInfo(name=connection_parameters.restricted_database_name)]
     async with _acquire_connection(connection_parameters) as connection:
         return await _fetch_databases(connection)
-
-
-async def list_databases_from_env() -> list[DatabaseInfo]:
-    connection_parameters = load_connection_parameters_from_env()
-    return await list_databases(connection_parameters)
 
 
 async def _fetch_schemas(connection: Connection | PoolConnectionProxy) -> list[SchemaInfo]:
@@ -256,25 +250,5 @@ def build_database_connection_parameters(
         username=base_parameters.username,
         password=base_parameters.password,
         database_name=database_name,
+        restricted_database_name=base_parameters.restricted_database_name,
     )
-
-
-async def connect_with_selection() -> None:
-    base_parameters = load_connection_parameters_from_env()
-    databases = await list_databases(base_parameters)
-
-    selected_database = _prompt_for_database_selection(databases)
-    selected_parameters = build_database_connection_parameters(
-        base_parameters,
-        selected_database.name,
-    )
-
-    async with _acquire_connection(selected_parameters) as connection:
-        row = await connection.fetchrow("SELECT current_database() AS name")
-    if row is None:
-        raise ValueError("Failed to read current database.")
-    print(f"Connected to database: {row['name']}")
-
-
-def connect_with_selection_sync() -> None:
-    asyncio.run(connect_with_selection())
