@@ -76,6 +76,10 @@ def _parse_connection_parameters(connection_url: str) -> ConnectionParameters:
     )
 
 
+def parse_connection_parameters(connection_url: str) -> ConnectionParameters:
+    return _parse_connection_parameters(connection_url)
+
+
 def _validate_identifier(name: str, label: str) -> None:
     if not _IDENTIFIER_RE.match(name):
         raise ValueError(f"Invalid {label} identifier: {name}")

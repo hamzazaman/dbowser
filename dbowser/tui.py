@@ -19,6 +19,8 @@ from textual.widgets import (
 )
 from textual.widgets._input import Selection
 
+from dbowser.config import AppConfig, ConnectionConfig
+
 from dbowser.postgres_driver import (
     ConnectionParameters,
     DatabaseInfo,
@@ -26,9 +28,11 @@ from dbowser.postgres_driver import (
     SchemaInfo,
     TableInfo,
     build_database_connection_parameters,
+    list_databases,
     list_rows,
     list_schemas,
     list_tables,
+    parse_connection_parameters,
 )
 
 
@@ -49,6 +53,12 @@ class TableListItem(ListItem):
         label = f"{table_name}  (~{estimated_rows})"
         super().__init__(Static(label))
         self.table_name = table_name
+
+
+class ConnectionListItem(ListItem):
+    def __init__(self, connection_name: str) -> None:
+        super().__init__(Static(connection_name))
+        self.connection_name = connection_name
 
 
 class _NamedItem(Protocol):
@@ -162,21 +172,28 @@ class DatabaseBrowserApp(App):
 
     def __init__(
         self,
-        base_connection_parameters: ConnectionParameters,
-        databases: list[DatabaseInfo],
+        config: AppConfig,
+        initial_connection_name: str | None = None,
+        initial_database_name: str | None = None,
+        initial_schema_name: str | None = None,
     ) -> None:
         super().__init__()
-        if not databases:
-            raise ValueError("No databases returned from server.")
-        self._base_connection_parameters = base_connection_parameters
-        self._databases = databases
+        if not config.connections:
+            raise ValueError("No saved connections found. Use 'dbowser add-connection'.")
+        self._connections = config.connections
+        self._connection_parameters: ConnectionParameters | None = None
+        self._selected_connection_name = ""
+        self._initial_connection_name = initial_connection_name or ""
+        self._initial_database_name = initial_database_name or ""
+        self._initial_schema_name = initial_schema_name or ""
+        self._databases: list[DatabaseInfo] = []
         self._schemas: list[SchemaInfo] = []
         self._tables: list[TableInfo] = []
         self._selected_database_name = ""
         self._selected_schema_name = ""
         self._selected_table_name = ""
         self._input_mode = ""
-        self._current_view = "database"
+        self._current_view = "connection"
         self._view_history: list[str] = []
         self._rows_page_limit = 100
         self._max_table_cell_width = 75
@@ -196,6 +213,7 @@ class DatabaseBrowserApp(App):
         self._rows_order_by_clause = ""
         self._error_dialog_open = False
         self._resource_filters: dict[str, str] = {
+            "connection": "",
             "database": "",
             "schema": "",
             "table": "",
@@ -228,12 +246,16 @@ class DatabaseBrowserApp(App):
         command_input = self.query_one("#command-input", Input)
         command_input.display = False
         self._update_keybinds()
+        if self._initial_connection_name:
+            await self._apply_initial_selection()
 
     async def action_select_resource(self) -> None:
         if self._input_mode:
             return
         resource_list = self._resource_list_view()
-        if self._current_view == "database":
+        if self._current_view == "connection":
+            await self._select_connection(resource_list)
+        elif self._current_view == "database":
             await self._select_database(resource_list)
         elif self._current_view == "schema":
             await self._select_schema(resource_list)
@@ -417,6 +439,7 @@ class DatabaseBrowserApp(App):
         self._last_g_pressed_at = now
 
     def _status_text(self) -> str:
+        connection_text = self._selected_connection_name or "<none>"
         database_text = self._selected_database_name or "<none>"
         schema_text = self._selected_schema_name or "<none>"
         table_text = self._selected_table_name or "<none>"
@@ -433,8 +456,8 @@ class DatabaseBrowserApp(App):
         if active_filter and self._current_view != "rows":
             filter_text = f" | filter: {active_filter}"
         return (
-            f"View: {self._current_view} | Selected database: "
-            f"{database_text} | schema: {schema_text} | table: {table_text}"
+            f"View: {self._current_view} | Connection: {connection_text} | "
+            f"db: {database_text} | schema: {schema_text} | table: {table_text}"
             f"{page_text}{filter_text}"
         )
 
@@ -494,6 +517,13 @@ class DatabaseBrowserApp(App):
             return
         resource_list.index = 0
 
+    async def _select_connection(self, resource_list: ListView) -> None:
+        if not isinstance(resource_list.highlighted_child, ConnectionListItem):
+            return
+        await self._select_connection_by_name(
+            resource_list.highlighted_child.connection_name
+        )
+
     async def _select_database(self, resource_list: ListView) -> None:
         if not isinstance(resource_list.highlighted_child, DatabaseListItem):
             return
@@ -526,12 +556,22 @@ class DatabaseBrowserApp(App):
         await self._load_rows()
         await self._set_view("rows")
 
+    async def _load_databases(self) -> None:
+        connection_parameters = self._require_connection_parameters()
+        async with self._loading("Loading databases..."):
+            try:
+                self._databases = await list_databases(connection_parameters)
+            except Exception as error:
+                self._databases = []
+                self._show_error_dialog("Failed to load databases", error)
+
     async def _load_schemas(self) -> None:
         if not self._selected_database_name:
             self._schemas = []
             return
+        base_parameters = self._require_connection_parameters()
         selected_parameters = build_database_connection_parameters(
-            self._base_connection_parameters,
+            base_parameters,
             self._selected_database_name,
         )
         async with self._loading("Loading schemas..."):
@@ -546,8 +586,9 @@ class DatabaseBrowserApp(App):
         if not self._selected_database_name or not self._selected_schema_name:
             self._tables = []
             return
+        base_parameters = self._require_connection_parameters()
         selected_parameters = build_database_connection_parameters(
-            self._base_connection_parameters,
+            base_parameters,
             self._selected_database_name,
         )
         async with self._loading("Loading tables..."):
@@ -575,7 +616,7 @@ class DatabaseBrowserApp(App):
             )
             return
         selected_parameters = build_database_connection_parameters(
-            self._base_connection_parameters,
+            self._require_connection_parameters(),
             self._selected_database_name,
         )
         async with self._loading("Loading rows..."):
@@ -707,6 +748,9 @@ class DatabaseBrowserApp(App):
     async def _handle_focus_command(self, command_text: str) -> bool:
         normalized = command_text.strip().lower()
         focus_map = {
+            "connection": "connection",
+            "connections": "connection",
+            "conn": "connection",
             "db": "database",
             "database": "database",
             "databases": "database",
@@ -753,6 +797,16 @@ class DatabaseBrowserApp(App):
     async def _refresh_view(self) -> None:
         resource_list = self._resource_list_view()
         resource_list.clear()
+        if self._current_view == "connection":
+            self._show_resource_list()
+            self._update_keybinds()
+            filtered = self._filter_items(
+                self._connections,
+                self._resource_filters["connection"],
+            )
+            for connection in filtered:
+                resource_list.append(ConnectionListItem(connection.name))
+            return
         if self._current_view == "database":
             self._show_resource_list()
             self._update_keybinds()
@@ -889,6 +943,69 @@ class DatabaseBrowserApp(App):
         if not filter_text:
             return list(items)
         return [item for item in items if filter_text.lower() in item.name.lower()]
+
+    def _require_connection_parameters(self) -> ConnectionParameters:
+        if self._connection_parameters is None:
+            raise ValueError("No connection selected.")
+        return self._connection_parameters
+
+    def _find_connection(self, connection_name: str) -> ConnectionConfig:
+        for connection in self._connections:
+            if connection.name == connection_name:
+                return connection
+        raise ValueError(f"Unknown connection: {connection_name}")
+
+    async def _apply_initial_selection(self) -> None:
+        try:
+            await self._select_connection_by_name(self._initial_connection_name)
+        except Exception as error:
+            self._show_error_dialog("Failed to select connection", error)
+            return
+        if self._initial_database_name:
+            await self._select_database_by_name(self._initial_database_name)
+        if self._initial_schema_name:
+            await self._select_schema_by_name(self._initial_schema_name)
+
+    async def _select_connection_by_name(self, connection_name: str) -> None:
+        connection = self._find_connection(connection_name)
+        self._selected_connection_name = connection.name
+        self._connection_parameters = parse_connection_parameters(connection.url)
+        self._selected_database_name = ""
+        self._selected_schema_name = ""
+        self._selected_table_name = ""
+        self._rows_page_offset = 0
+        self._rows_where_clause = ""
+        self._rows_order_by_clause = ""
+        self._update_status()
+        await self._load_databases()
+        await self._set_view("database")
+
+    async def _select_database_by_name(self, database_name: str) -> None:
+        if not self._databases:
+            await self._load_databases()
+        if database_name not in {database.name for database in self._databases}:
+            raise ValueError(f"Unknown database: {database_name}")
+        self._selected_database_name = database_name
+        self._selected_schema_name = ""
+        self._selected_table_name = ""
+        self._rows_page_offset = 0
+        self._update_status()
+        await self._load_schemas()
+        await self._set_view("schema")
+
+    async def _select_schema_by_name(self, schema_name: str) -> None:
+        if not self._selected_database_name:
+            raise ValueError("Database must be selected before schema.")
+        if not self._schemas:
+            await self._load_schemas()
+        if schema_name not in {schema.name for schema in self._schemas}:
+            raise ValueError(f"Unknown schema: {schema_name}")
+        self._selected_schema_name = schema_name
+        self._selected_table_name = ""
+        self._rows_page_offset = 0
+        self._update_status()
+        await self._load_tables()
+        await self._set_view("table")
 
     def _set_input_cursor_to_end(self, input_field: Input) -> None:
         input_field.cursor_position = len(input_field.value)
