@@ -87,10 +87,25 @@ class DatabaseBrowserApp(App):
         height: 1;
     }
 
+    #order-bar {
+        height: 1;
+    }
+
     #command-input {
         height: 1;
         border: none;
         padding: 0 1;
+    }
+
+    #input-bar {
+        height: 1;
+    }
+
+    #input-prefix {
+        width: auto;
+        padding: 0 1;
+        content-align: left middle;
+        color: rgb(160, 200, 255);
     }
 
     #resource-list {
@@ -138,6 +153,7 @@ class DatabaseBrowserApp(App):
         ("G", "cursor_bottom", "Bottom"),
         ("ctrl+p", "enter_palette_mode", "Palette"),
         ("w", "enter_where_mode", "Where"),
+        ("o", "enter_order_mode", "Order"),
         ("/", "enter_filter_mode", "Filter"),
         (":", "enter_command_mode", "Command"),
         ("escape", "escape", "Back"),
@@ -177,6 +193,7 @@ class DatabaseBrowserApp(App):
             has_more=False,
         )
         self._rows_where_clause = ""
+        self._rows_order_by_clause = ""
         self._error_dialog_open = False
         self._resource_filters: dict[str, str] = {
             "database": "",
@@ -196,7 +213,10 @@ class DatabaseBrowserApp(App):
             keybinds.id = "keybinds-bar"
             yield keybinds
             yield Static(self._where_text(), id="where-bar")
-            yield Input(placeholder="Command", id="command-input")
+            yield Static(self._order_text(), id="order-bar")
+            with Horizontal(id="input-bar"):
+                yield Static("", id="input-prefix")
+                yield Input(placeholder="Command", id="command-input")
             yield ListView(id="resource-list")
             yield DataTable(id="rows-table")
 
@@ -239,6 +259,12 @@ class DatabaseBrowserApp(App):
             self._update_message("WHERE is only available in rows view.")
             return
         self._enter_input_mode("where")
+
+    def action_enter_order_mode(self) -> None:
+        if self._current_view != "rows":
+            self._update_message("ORDER BY is only available in rows view.")
+            return
+        self._enter_input_mode("order")
 
     def action_cursor_down(self) -> None:
         if self._input_mode:
@@ -344,24 +370,20 @@ class DatabaseBrowserApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "command-input":
             return
-        if self._input_mode == "where":
-            return
-        prefix = "/" if self._input_mode == "filter" else ":"
         if not self._input_mode:
             return
-        if not event.value.startswith(prefix):
-            event.input.value = prefix + self._strip_prompt_prefix(event.value)
-            self._set_input_cursor_to_end(event.input)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "command-input":
             return
-        submitted_value = self._strip_prompt_prefix(event.value.strip())
+        submitted_value = event.value.strip()
         try:
             if self._input_mode == "filter":
                 await self._apply_filter(submitted_value)
             elif self._input_mode == "where":
                 await self._apply_where_clause(submitted_value)
+            elif self._input_mode == "order":
+                await self._apply_order_by_clause(submitted_value)
             elif self._input_mode in {"command", "palette"}:
                 await self._run_command(submitted_value)
         finally:
@@ -404,6 +426,8 @@ class DatabaseBrowserApp(App):
             page_text = f" | page: {page_number} ({self._rows_page_limit}/page)"
             if self._rows_where_clause:
                 page_text += f" | where: {self._rows_where_clause}"
+            if self._rows_order_by_clause:
+                page_text += f" | order: {self._rows_order_by_clause}"
         filter_text = ""
         active_filter = self._resource_filters.get(self._current_view, "")
         if active_filter and self._current_view != "rows":
@@ -419,6 +443,11 @@ class DatabaseBrowserApp(App):
             return "WHERE: <none>"
         return f"WHERE: {self._rows_where_clause}"
 
+    def _order_text(self) -> str:
+        if not self._rows_order_by_clause:
+            return "ORDER BY: <none>"
+        return f"ORDER BY: {self._rows_order_by_clause}"
+
     def _update_status(self) -> None:
         status = self.query_one("#selected-status", Static)
         status.update(self._status_text())
@@ -433,6 +462,9 @@ class DatabaseBrowserApp(App):
         where_bar = self.query_one("#where-bar", Static)
         where_bar.update(self._where_text())
         where_bar.display = self._current_view == "rows"
+        order_bar = self.query_one("#order-bar", Static)
+        order_bar.update(self._order_text())
+        order_bar.display = self._current_view == "rows"
 
     def _set_loading(self, is_loading: bool, message: str = "Loading...") -> None:
         loading_indicator = self.query_one("#loading-indicator", Static)
@@ -488,6 +520,7 @@ class DatabaseBrowserApp(App):
             return
         self._selected_table_name = resource_list.highlighted_child.table_name
         self._rows_page_offset = 0
+        self._rows_order_by_clause = ""
         self._update_status()
         self._show_rows_loading_state()
         await self._load_rows()
@@ -554,6 +587,7 @@ class DatabaseBrowserApp(App):
                     self._rows_page_limit,
                     self._rows_page_offset,
                     self._rows_where_clause,
+                    self._rows_order_by_clause,
                 )
             except Exception as error:
                 self._rows_page = RowPage(
@@ -570,27 +604,36 @@ class DatabaseBrowserApp(App):
             return
         self._input_mode = mode
         command_input = self.query_one("#command-input", Input)
+        input_prefix = self.query_one("#input-prefix", Static)
         if mode == "filter":
             command_input.placeholder = "Filter"
+            input_prefix.update("/")
         elif mode == "where":
             command_input.placeholder = "WHERE clause"
+            input_prefix.update("WHERE")
+        elif mode == "order":
+            command_input.placeholder = "ORDER BY clause"
+            input_prefix.update("ORDER BY")
         elif mode == "palette":
             command_input.placeholder = "Palette (q to quit)"
+            input_prefix.update("^P")
         else:
             command_input.placeholder = "Command (q to quit)"
+            input_prefix.update(":")
         if mode == "filter":
-            command_input.value = (
-                "/" + self._resource_filters.get(self._current_view, "")
-            )
+            command_input.value = self._resource_filters.get(self._current_view, "")
         elif mode == "where":
             command_input.value = self._rows_where_clause
+        elif mode == "order":
+            command_input.value = self._rows_order_by_clause
         elif mode == "palette":
             command_input.value = ""
         else:
-            command_input.value = ":"
+            command_input.value = ""
         command_input.select_on_focus = False
         self._set_input_cursor_to_end(command_input)
         command_input.display = True
+        input_prefix.display = True
         command_input.focus()
         if mode == "filter":
             self._update_message("FILTER:")
@@ -599,6 +642,11 @@ class DatabaseBrowserApp(App):
             where_bar = self.query_one("#where-bar", Static)
             where_bar.display = True
             where_bar.update(self._where_text())
+        elif mode == "order":
+            self._update_message("ORDER BY:")
+            order_bar = self.query_one("#order-bar", Static)
+            order_bar.display = True
+            order_bar.update(self._order_text())
         elif mode == "palette":
             self._update_message("PALETTE:")
         else:
@@ -607,8 +655,11 @@ class DatabaseBrowserApp(App):
 
     def _close_input_mode(self) -> None:
         command_input = self.query_one("#command-input", Input)
+        input_prefix = self.query_one("#input-prefix", Static)
         command_input.display = False
         command_input.value = ""
+        input_prefix.update("")
+        input_prefix.display = False
         self._input_mode = ""
         if self._current_view == "rows":
             self._rows_table_view().focus()
@@ -626,6 +677,15 @@ class DatabaseBrowserApp(App):
         self._rows_where_clause = where_clause
         self._rows_page_offset = 0
         self._update_message("WHERE applied.")
+        self._update_status()
+        self._update_keybinds()
+        if self._current_view == "rows":
+            await self._refresh_view()
+
+    async def _apply_order_by_clause(self, order_by_clause: str) -> None:
+        self._rows_order_by_clause = order_by_clause
+        self._rows_page_offset = 0
+        self._update_message("ORDER BY applied.")
         self._update_status()
         self._update_keybinds()
         if self._current_view == "rows":
@@ -833,10 +893,6 @@ class DatabaseBrowserApp(App):
     def _set_input_cursor_to_end(self, input_field: Input) -> None:
         input_field.cursor_position = len(input_field.value)
         input_field.selection = Selection.cursor(input_field.cursor_position)
-    def _strip_prompt_prefix(self, value: str) -> str:
-        if value.startswith(("/", ":")):
-            return value[1:].lstrip()
-        return value
 
     async def _clear_active_filter(self) -> bool:
         if self._current_view == "rows":
@@ -865,7 +921,7 @@ class DatabaseBrowserApp(App):
         if self._input_mode == "filter":
             return [("enter", "Apply"), ("esc", "Cancel")]
 
-        base = [("q", "Quit"), (":", "Command"), ("esc", "Back"), ("^p", "Palette")]
+        base = [("q", "Quit"), (":", "Command"), ("esc", "Back")]
         movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
 
         if self._current_view == "rows":
@@ -875,14 +931,16 @@ class DatabaseBrowserApp(App):
                 + [
                     ("h/l", "Left/Right"),
                     ("w", "Where"),
+                    ("o", "Order By"),
                     (": pagesize N", "Rows/Page"),
                     ("enter", "View Cell"),
                     ("y", "Yank"),
                     ("n/p", "Page"),
                 ]
+                + [("^p", "Palette")]
             )
 
-        return base + movement + [("/", "Filter"), ("enter", "Select")]
+        return base + movement + [("/", "Filter"), ("enter", "Select"), ("^p", "Palette")]
 
     def _format_cell_value(self, value: object) -> str:
         if isinstance(value, (dict, list)):

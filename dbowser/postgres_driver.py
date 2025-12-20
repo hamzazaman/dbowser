@@ -7,10 +7,13 @@ from typing import AsyncIterator, Iterable
 from urllib.parse import urlparse
 
 import asyncpg
-from asyncpg import Connection
+from asyncpg import Connection, Pool
+from asyncpg.pool import PoolConnectionProxy
 
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_POOL_MIN_SIZE = 1
+_POOL_MAX_SIZE = 4
 
 
 @dataclass(frozen=True)
@@ -20,6 +23,9 @@ class ConnectionParameters:
     username: str
     password: str
     database_name: str
+
+
+_pools: dict[ConnectionParameters, Pool] = {}
 
 
 @dataclass(frozen=True)
@@ -75,26 +81,39 @@ def _validate_identifier(name: str, label: str) -> None:
         raise ValueError(f"Invalid {label} identifier: {name}")
 
 
-@asynccontextmanager
-async def _open_connection(
-    connection_parameters: ConnectionParameters,
-) -> AsyncIterator[Connection]:
-    connection = await asyncpg.connect(
+async def _init_connection(connection: Connection) -> None:
+    await connection.execute("SET default_transaction_read_only = on")
+    await connection.execute("SET statement_timeout = '10s'")
+
+
+async def _get_pool(connection_parameters: ConnectionParameters) -> Pool:
+    pool = _pools.get(connection_parameters)
+    if pool is not None:
+        return pool
+    pool = await asyncpg.create_pool(
         host=connection_parameters.host,
         port=connection_parameters.port,
         user=connection_parameters.username,
         password=connection_parameters.password,
         database=connection_parameters.database_name,
+        min_size=_POOL_MIN_SIZE,
+        max_size=_POOL_MAX_SIZE,
+        init=_init_connection,
     )
-    try:
-        await connection.execute("SET default_transaction_read_only = on")
-        await connection.execute("SET statement_timeout = '10s'")
+    _pools[connection_parameters] = pool
+    return pool
+
+
+@asynccontextmanager
+async def _acquire_connection(
+    connection_parameters: ConnectionParameters,
+) -> AsyncIterator[Connection | PoolConnectionProxy]:
+    pool = await _get_pool(connection_parameters)
+    async with pool.acquire() as connection:
         yield connection
-    finally:
-        await connection.close()
 
 
-async def _fetch_databases(connection: Connection) -> list[DatabaseInfo]:
+async def _fetch_databases(connection: Connection | PoolConnectionProxy) -> list[DatabaseInfo]:
     query = """
         SELECT datname
         FROM pg_database
@@ -129,7 +148,7 @@ def load_connection_parameters_from_env() -> ConnectionParameters:
 async def list_databases(
     connection_parameters: ConnectionParameters,
 ) -> list[DatabaseInfo]:
-    async with _open_connection(connection_parameters) as connection:
+    async with _acquire_connection(connection_parameters) as connection:
         return await _fetch_databases(connection)
 
 
@@ -138,7 +157,7 @@ async def list_databases_from_env() -> list[DatabaseInfo]:
     return await list_databases(connection_parameters)
 
 
-async def _fetch_schemas(connection: Connection) -> list[SchemaInfo]:
+async def _fetch_schemas(connection: Connection | PoolConnectionProxy) -> list[SchemaInfo]:
     query = """
         SELECT schema_name
         FROM information_schema.schemata
@@ -151,11 +170,14 @@ async def _fetch_schemas(connection: Connection) -> list[SchemaInfo]:
 async def list_schemas(
     connection_parameters: ConnectionParameters,
 ) -> list[SchemaInfo]:
-    async with _open_connection(connection_parameters) as connection:
+    async with _acquire_connection(connection_parameters) as connection:
         return await _fetch_schemas(connection)
 
 
-async def _fetch_tables(connection: Connection, schema_name: str) -> list[TableInfo]:
+async def _fetch_tables(
+    connection: Connection | PoolConnectionProxy,
+    schema_name: str,
+) -> list[TableInfo]:
     query = """
         SELECT
             c.relname AS table_name,
@@ -183,7 +205,7 @@ async def list_tables(
     connection_parameters: ConnectionParameters,
     schema_name: str,
 ) -> list[TableInfo]:
-    async with _open_connection(connection_parameters) as connection:
+    async with _acquire_connection(connection_parameters) as connection:
         return await _fetch_tables(connection, schema_name)
 
 
@@ -194,15 +216,17 @@ async def list_rows(
     limit: int,
     offset: int,
     where_clause: str,
+    order_by_clause: str,
 ) -> RowPage:
     _validate_identifier(schema_name, "schema")
     _validate_identifier(table_name, "table")
     where_sql = f" WHERE {where_clause}" if where_clause else ""
+    order_sql = f" ORDER BY {order_by_clause}" if order_by_clause else ""
     query = (
         f'SELECT * FROM "{schema_name}"."{table_name}"'
-        f"{where_sql} LIMIT $1 OFFSET $2"
+        f"{where_sql}{order_sql} LIMIT $1 OFFSET $2"
     )
-    async with _open_connection(connection_parameters) as connection:
+    async with _acquire_connection(connection_parameters) as connection:
         statement = await connection.prepare(query)
         columns = [attribute.name for attribute in statement.get_attributes()]
         records = await statement.fetch(limit + 1, offset)
@@ -241,7 +265,7 @@ async def connect_with_selection() -> None:
         selected_database.name,
     )
 
-    async with _open_connection(selected_parameters) as connection:
+    async with _acquire_connection(selected_parameters) as connection:
         row = await connection.fetchrow("SELECT current_database() AS name")
     if row is None:
         raise ValueError("Failed to read current database.")
