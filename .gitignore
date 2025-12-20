@@ -22,6 +22,7 @@ node_modules
 package.json
 tessdata_fast-main/
 tags
+*.egg-info/
 
 # Ignore the .idea/ directory (PyCharm project files)
 .idea/

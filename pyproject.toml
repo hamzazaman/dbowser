@@ -5,3 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = ["asyncpg>=0.29.0", "textual>=0.86.0"]
+
+[project.scripts]
+dbowser = "dbowser.main:main"
