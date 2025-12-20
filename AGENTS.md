@@ -38,3 +38,10 @@
       drivers_license_number: str
       drivers_license_expiration: date
   ```
+
+## Project Context & Workflow
+- This project is a Textual-based TUI for Postgres, inspired by k9s and DBeaver.
+- The UI uses async data loading via `asyncpg`; keep network calls async and avoid blocking the event loop.
+- Prefer short-lived, read-only connections; use `default_transaction_read_only` and timeouts as already configured.
+- Keep view state explicit and avoid hiding behavior in implicit globals or side effects.
+- Keybindings should be context-aware and match k9s-style expectations where possible.

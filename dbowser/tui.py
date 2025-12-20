@@ -278,6 +278,13 @@ class DatabaseBrowserApp(App):
         await self._load_rows()
         self._populate_rows_table(self._rows_page)
 
+    def _can_turn_page(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_page_turn_at < self._page_turn_cooldown_seconds:
+            return False
+        self._last_page_turn_at = now
+        return True
+
     async def action_escape(self) -> None:
         if self._input_mode:
             self._close_input_mode()
@@ -755,10 +762,3 @@ class CellDetailScreen(ModalScreen[None]):
 
 class KeyBindingBar(Static):
     pass
-
-    def _can_turn_page(self) -> bool:
-        now = time.monotonic()
-        if now - self._last_page_turn_at < self._page_turn_cooldown_seconds:
-            return False
-        self._last_page_turn_at = now
-        return True
