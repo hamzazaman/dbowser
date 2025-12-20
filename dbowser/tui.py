@@ -460,9 +460,19 @@ class DatabaseBrowserApp(App):
             return
         if self._input_mode or self._current_view != "rows":
             return
-        self._show_cell_detail()
+        rows_table = event.data_table
+        rows_table.move_cursor(
+            row=event.coordinate.row,
+            column=event.coordinate.column,
+            animate=False,
+        )
 
     def on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            if not self._input_mode and self._current_view == "rows":
+                self._show_cell_detail()
+                event.stop()
+                return
         if event.key != "g":
             return
         if self._input_mode:
