@@ -193,10 +193,15 @@ async def list_rows(
     table_name: str,
     limit: int,
     offset: int,
+    where_clause: str,
 ) -> RowPage:
     _validate_identifier(schema_name, "schema")
     _validate_identifier(table_name, "table")
-    query = f'SELECT * FROM "{schema_name}"."{table_name}" LIMIT $1 OFFSET $2'
+    where_sql = f" WHERE {where_clause}" if where_clause else ""
+    query = (
+        f'SELECT * FROM "{schema_name}"."{table_name}"'
+        f"{where_sql} LIMIT $1 OFFSET $2"
+    )
     async with _open_connection(connection_parameters) as connection:
         statement = await connection.prepare(query)
         columns = [attribute.name for attribute in statement.get_attributes()]
@@ -238,6 +243,8 @@ async def connect_with_selection() -> None:
 
     async with _open_connection(selected_parameters) as connection:
         row = await connection.fetchrow("SELECT current_database() AS name")
+    if row is None:
+        raise ValueError("Failed to read current database.")
     print(f"Connected to database: {row['name']}")
 
 

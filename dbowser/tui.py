@@ -82,6 +82,10 @@ class DatabaseBrowserApp(App):
         height: 1;
     }
 
+    #where-bar {
+        height: 1;
+    }
+
     #command-input {
         height: 1;
         border: none;
@@ -108,6 +112,7 @@ class DatabaseBrowserApp(App):
         ("p", "previous_page", "Prev Page"),
         ("G", "cursor_bottom", "Bottom"),
         ("ctrl+p", "enter_command_mode", "Command"),
+        ("w", "enter_where_mode", "Where"),
         ("/", "enter_filter_mode", "Filter"),
         (":", "enter_command_mode", "Command"),
         ("escape", "escape", "Back"),
@@ -135,8 +140,8 @@ class DatabaseBrowserApp(App):
         self._rows_page_limit = 100
         self._max_table_cell_width = 75
         self._rows_page_offset = 0
-        self._page_turn_cooldown_seconds = 0.25
-        self._last_page_turn_at = 0.0
+        self._page_turn_cooldown_seconds = 0.4
+        self._page_turn_block_until = 0.0
         self._last_g_pressed_at = 0.0
         self._gg_timeout_seconds = 0.4
         self._rows_page = RowPage(
@@ -146,6 +151,7 @@ class DatabaseBrowserApp(App):
             offset=self._rows_page_offset,
             has_more=False,
         )
+        self._rows_where_clause = ""
         self._resource_filters: dict[str, str] = {
             "database": "",
             "schema": "",
@@ -160,7 +166,10 @@ class DatabaseBrowserApp(App):
                 yield Static(self._status_text(), id="selected-status")
                 yield Static("", id="loading-indicator")
             yield Static("", id="message-line")
-            yield KeyBindingBar(id="keybinds-bar")
+            keybinds = KeyBindingBar()
+            keybinds.id = "keybinds-bar"
+            yield keybinds
+            yield Static(self._where_text(), id="where-bar")
             yield Input(placeholder="Command", id="command-input")
             yield ListView(id="resource-list")
             yield DataTable(id="rows-table")
@@ -195,6 +204,12 @@ class DatabaseBrowserApp(App):
 
     def action_enter_command_mode(self) -> None:
         self._enter_input_mode("command")
+
+    def action_enter_where_mode(self) -> None:
+        if self._current_view != "rows":
+            self._update_message("WHERE is only available in rows view.")
+            return
+        self._enter_input_mode("where")
 
     def action_cursor_down(self) -> None:
         if self._input_mode:
@@ -283,9 +298,10 @@ class DatabaseBrowserApp(App):
 
     def _can_turn_page(self) -> bool:
         now = time.monotonic()
-        if now - self._last_page_turn_at < self._page_turn_cooldown_seconds:
+        if now < self._page_turn_block_until:
+            self._page_turn_block_until = now + self._page_turn_cooldown_seconds
             return False
-        self._last_page_turn_at = now
+        self._page_turn_block_until = now + self._page_turn_cooldown_seconds
         return True
 
     async def action_escape(self) -> None:
@@ -299,13 +315,14 @@ class DatabaseBrowserApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "command-input":
             return
+        if self._input_mode == "where":
+            return
         prefix = "/" if self._input_mode == "filter" else ":"
         if not self._input_mode:
             return
         if not event.value.startswith(prefix):
             event.input.value = prefix + self._strip_prompt_prefix(event.value)
-            if hasattr(event.input, "cursor_position"):
-                event.input.cursor_position = len(event.input.value)
+            self._set_input_cursor_to_end(event.input)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "command-input":
@@ -313,6 +330,8 @@ class DatabaseBrowserApp(App):
         submitted_value = self._strip_prompt_prefix(event.value.strip())
         if self._input_mode == "filter":
             await self._apply_filter(submitted_value)
+        elif self._input_mode == "where":
+            await self._apply_where_clause(submitted_value)
         elif self._input_mode == "command":
             await self._run_command(submitted_value)
         self._close_input_mode()
@@ -352,6 +371,8 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             page_number = (self._rows_page_offset // self._rows_page_limit) + 1
             page_text = f" | page: {page_number}"
+            if self._rows_where_clause:
+                page_text += f" | where: {self._rows_where_clause}"
         filter_text = ""
         active_filter = self._resource_filters.get(self._current_view, "")
         if active_filter and self._current_view != "rows":
@@ -361,6 +382,11 @@ class DatabaseBrowserApp(App):
             f"{database_text} | schema: {schema_text} | table: {table_text}"
             f"{page_text}{filter_text}"
         )
+
+    def _where_text(self) -> str:
+        if not self._rows_where_clause:
+            return "WHERE: <none>"
+        return f"WHERE: {self._rows_where_clause}"
 
     def _update_status(self) -> None:
         status = self.query_one("#selected-status", Static)
@@ -373,6 +399,9 @@ class DatabaseBrowserApp(App):
     def _update_keybinds(self) -> None:
         keybinds = self.query_one("#keybinds-bar", KeyBindingBar)
         keybinds.update(self._footer_text())
+        where_bar = self.query_one("#where-bar", Static)
+        where_bar.update(self._where_text())
+        where_bar.display = self._current_view == "rows"
 
     def _set_loading(self, is_loading: bool, message: str = "Loading...") -> None:
         loading_indicator = self.query_one("#loading-indicator", Static)
@@ -442,7 +471,11 @@ class DatabaseBrowserApp(App):
             self._selected_database_name,
         )
         async with self._loading("Loading schemas..."):
-            self._schemas = await list_schemas(selected_parameters)
+            try:
+                self._schemas = await list_schemas(selected_parameters)
+            except Exception as error:
+                self._schemas = []
+                self._show_error_dialog("Failed to load schemas", error)
         self._tables = []
 
     async def _load_tables(self) -> None:
@@ -454,10 +487,14 @@ class DatabaseBrowserApp(App):
             self._selected_database_name,
         )
         async with self._loading("Loading tables..."):
-            self._tables = await list_tables(
-                selected_parameters,
-                self._selected_schema_name,
-            )
+            try:
+                self._tables = await list_tables(
+                    selected_parameters,
+                    self._selected_schema_name,
+                )
+            except Exception as error:
+                self._tables = []
+                self._show_error_dialog("Failed to load tables", error)
 
     async def _load_rows(self) -> None:
         if (
@@ -478,33 +515,57 @@ class DatabaseBrowserApp(App):
             self._selected_database_name,
         )
         async with self._loading("Loading rows..."):
-            self._rows_page = await list_rows(
-                selected_parameters,
-                self._selected_schema_name,
-                self._selected_table_name,
-                self._rows_page_limit,
-                self._rows_page_offset,
-            )
+            try:
+                self._rows_page = await list_rows(
+                    selected_parameters,
+                    self._selected_schema_name,
+                    self._selected_table_name,
+                    self._rows_page_limit,
+                    self._rows_page_offset,
+                    self._rows_where_clause,
+                )
+            except Exception as error:
+                self._rows_page = RowPage(
+                    columns=[],
+                    rows=[],
+                    limit=self._rows_page_limit,
+                    offset=self._rows_page_offset,
+                    has_more=False,
+                )
+                self._show_error_dialog("Failed to load rows", error)
 
     def _enter_input_mode(self, mode: str) -> None:
         if self._input_mode:
             return
         self._input_mode = mode
         command_input = self.query_one("#command-input", Input)
-        command_input.placeholder = (
-            "Filter" if mode == "filter" else "Command (q to quit)"
-        )
+        if mode == "filter":
+            command_input.placeholder = "Filter"
+        elif mode == "where":
+            command_input.placeholder = "WHERE clause"
+        else:
+            command_input.placeholder = "Command (q to quit)"
         if mode == "filter":
             command_input.value = (
                 "/" + self._resource_filters.get(self._current_view, "")
             )
+        elif mode == "where":
+            command_input.value = self._rows_where_clause
         else:
             command_input.value = ":"
-        if hasattr(command_input, "cursor_position"):
-            command_input.cursor_position = len(command_input.value)
+        command_input.select_on_focus = False
+        self._set_input_cursor_to_end(command_input)
         command_input.display = True
         command_input.focus()
-        self._update_message("FILTER:" if mode == "filter" else "COMMAND:")
+        if mode == "filter":
+            self._update_message("FILTER:")
+        elif mode == "where":
+            self._update_message("WHERE:")
+            where_bar = self.query_one("#where-bar", Static)
+            where_bar.display = True
+            where_bar.update(self._where_text())
+        else:
+            self._update_message("COMMAND:")
         self._update_keybinds()
 
     def _close_input_mode(self) -> None:
@@ -523,6 +584,15 @@ class DatabaseBrowserApp(App):
         self._resource_filters[self._current_view] = filter_text
         self._update_status()
         await self._refresh_view()
+
+    async def _apply_where_clause(self, where_clause: str) -> None:
+        self._rows_where_clause = where_clause
+        self._rows_page_offset = 0
+        self._update_message("WHERE applied.")
+        self._update_status()
+        self._update_keybinds()
+        if self._current_view == "rows":
+            await self._refresh_view()
 
     async def _run_command(self, command_text: str) -> None:
         if command_text in {"q", "quit", "exit"}:
@@ -563,6 +633,7 @@ class DatabaseBrowserApp(App):
         resource_list.clear()
         if self._current_view == "database":
             self._show_resource_list()
+            self._update_keybinds()
             filtered = self._filter_items(
                 self._databases,
                 self._resource_filters["database"],
@@ -576,6 +647,7 @@ class DatabaseBrowserApp(App):
                 self._update_message("Select a database first.")
                 return
             await self._load_schemas()
+            self._update_keybinds()
             filtered = self._filter_items(
                 self._schemas,
                 self._resource_filters["schema"],
@@ -592,6 +664,7 @@ class DatabaseBrowserApp(App):
                 self._update_message("Select a schema first.")
                 return
             await self._load_tables()
+            self._update_keybinds()
             filtered = self._filter_items(
                 self._tables,
                 self._resource_filters["table"],
@@ -614,6 +687,7 @@ class DatabaseBrowserApp(App):
                 return
             await self._load_rows()
             self._populate_rows_table(self._rows_page)
+            self._update_keybinds()
 
     async def _set_view(self, target_view: str) -> None:
         if target_view == self._current_view:
@@ -694,6 +768,8 @@ class DatabaseBrowserApp(App):
             return list(items)
         return [item for item in items if filter_text.lower() in item.name.lower()]
 
+    def _set_input_cursor_to_end(self, input_field: Input) -> None:
+        input_field.cursor_position = len(input_field.value)
     def _strip_prompt_prefix(self, value: str) -> str:
         if value.startswith(("/", ":")):
             return value[1:].lstrip()
@@ -733,6 +809,7 @@ class DatabaseBrowserApp(App):
                 + movement
                 + [
                     ("h/l", "Left/Right"),
+                    ("w", "Where"),
                     ("enter", "View Cell"),
                     ("y", "Yank"),
                     ("n/p", "Page"),
@@ -778,6 +855,9 @@ class DatabaseBrowserApp(App):
         cell_value = row[coordinate.column]
         self.push_screen(CellDetailScreen(self._format_cell_value_full(cell_value)))
 
+    def _show_error_dialog(self, title: str, error: Exception) -> None:
+        self.push_screen(ErrorDialog(title, str(error)))
+
 
 class CellDetailScreen(ModalScreen[None]):
     BINDINGS = [
@@ -800,5 +880,22 @@ class CellDetailScreen(ModalScreen[None]):
 
 
 class KeyBindingBar(Static):
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__("", markup=True, **kwargs)
+    def __init__(self) -> None:
+        super().__init__("", markup=True)
+
+
+class ErrorDialog(ModalScreen[None]):
+    BINDINGS = [
+        ("q", "dismiss", "Close"),
+        ("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, title: str, message: str) -> None:
+        super().__init__()
+        self._title = title
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._title)
+            yield Static(self._message)
