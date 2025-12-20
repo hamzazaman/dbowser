@@ -74,8 +74,24 @@ class DatabaseBrowserApp(App):
         content-align: right middle;
     }
 
-    #keybinds-footer {
+    #keybinds-bar {
         height: 1;
+    }
+
+    #message-line {
+        height: 1;
+    }
+
+    #command-input {
+        height: 1;
+    }
+
+    #resource-list {
+        height: 1fr;
+    }
+
+    #rows-table {
+        height: 1fr;
     }
     """
 
@@ -141,10 +157,10 @@ class DatabaseBrowserApp(App):
                 yield Static(self._status_text(), id="selected-status")
                 yield Static("", id="loading-indicator")
             yield Static("", id="message-line")
+            yield KeyBindingBar(id="keybinds-bar")
+            yield Input(placeholder="Command", id="command-input")
             yield ListView(id="resource-list")
             yield DataTable(id="rows-table")
-            yield Input(placeholder="Command", id="command-input")
-            yield KeyBindingFooter(id="keybinds-footer")
 
     async def on_mount(self) -> None:
         await self._refresh_view()
@@ -153,7 +169,7 @@ class DatabaseBrowserApp(App):
         rows_table.display = False
         command_input = self.query_one("#command-input", Input)
         command_input.display = False
-        self._update_footer()
+        self._update_keybinds()
 
     async def action_select_resource(self) -> None:
         if self._input_mode:
@@ -169,6 +185,9 @@ class DatabaseBrowserApp(App):
             self._show_cell_detail()
 
     def action_enter_filter_mode(self) -> None:
+        if self._current_view == "rows":
+            self._update_message("Filters are not available in rows view.")
+            return
         self._enter_input_mode("filter")
 
     def action_enter_command_mode(self) -> None:
@@ -263,6 +282,8 @@ class DatabaseBrowserApp(App):
         if self._input_mode:
             self._close_input_mode()
             return
+        if await self._clear_active_filter():
+            return
         await self._pop_view_history()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -310,10 +331,14 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             page_number = (self._rows_page_offset // self._rows_page_limit) + 1
             page_text = f" | page: {page_number}"
+        filter_text = ""
+        active_filter = self._resource_filters.get(self._current_view, "")
+        if active_filter and self._current_view != "rows":
+            filter_text = f" | filter: {active_filter}"
         return (
             f"View: {self._current_view} | Selected database: "
             f"{database_text} | schema: {schema_text} | table: {table_text}"
-            f"{page_text}"
+            f"{page_text}{filter_text}"
         )
 
     def _update_status(self) -> None:
@@ -324,9 +349,9 @@ class DatabaseBrowserApp(App):
         message_line = self.query_one("#message-line", Static)
         message_line.update(message)
 
-    def _update_footer(self) -> None:
-        footer = self.query_one("#keybinds-footer", KeyBindingFooter)
-        footer.update(self._footer_text())
+    def _update_keybinds(self) -> None:
+        keybinds = self.query_one("#keybinds-bar", KeyBindingBar)
+        keybinds.update(self._footer_text())
 
     def _set_loading(self, is_loading: bool, message: str = "Loading...") -> None:
         loading_indicator = self.query_one("#loading-indicator", Static)
@@ -453,7 +478,8 @@ class DatabaseBrowserApp(App):
             command_input.value = ""
         command_input.display = True
         command_input.focus()
-        self._update_footer()
+        self._update_message("FILTER:" if mode == "filter" else "COMMAND:")
+        self._update_keybinds()
 
     def _close_input_mode(self) -> None:
         command_input = self.query_one("#command-input", Input)
@@ -464,10 +490,12 @@ class DatabaseBrowserApp(App):
             self._rows_table_view().focus()
         else:
             self._resource_list_view().focus()
-        self._update_footer()
+        self._update_message("")
+        self._update_keybinds()
 
     async def _apply_filter(self, filter_text: str) -> None:
         self._resource_filters[self._current_view] = filter_text
+        self._update_status()
         await self._refresh_view()
 
     async def _run_command(self, command_text: str) -> None:
@@ -568,7 +596,7 @@ class DatabaseBrowserApp(App):
         self._current_view = target_view
         self._update_status()
         await self._refresh_view()
-        self._update_footer()
+        self._update_keybinds()
 
     async def _pop_view_history(self) -> None:
         if not self._view_history:
@@ -579,7 +607,7 @@ class DatabaseBrowserApp(App):
         self._current_view = previous_view
         self._update_status()
         await self._refresh_view()
-        self._update_footer()
+        self._update_keybinds()
 
     def _show_resource_list(self) -> None:
         resource_list = self._resource_list_view()
@@ -609,7 +637,9 @@ class DatabaseBrowserApp(App):
             max_cell_width = len(column_name)
             for formatted_row in formatted_rows:
                 if column_index < len(formatted_row):
-                    max_cell_width = max(max_cell_width, len(formatted_row[column_index]))
+                    max_cell_width = max(
+                        max_cell_width, len(formatted_row[column_index])
+                    )
             column_widths.append(min(max_cell_width, self._max_table_cell_width))
         for column_name, width in zip(row_page.columns, column_widths, strict=False):
             rows_table.add_column(column_name, width=width or 1)
@@ -626,6 +656,18 @@ class DatabaseBrowserApp(App):
             return list(items)
         return [item for item in items if filter_text.lower() in item.name.lower()]
 
+    async def _clear_active_filter(self) -> bool:
+        if self._current_view == "rows":
+            return False
+        if not self._resource_filters.get(self._current_view, ""):
+            return False
+        self._resource_filters[self._current_view] = ""
+        self._update_message("Filter cleared.")
+        self._update_status()
+        self._update_keybinds()
+        await self._refresh_view()
+        return True
+
     def _footer_text(self) -> str:
         bindings = self._footer_bindings()
         return "  ".join([f"{key}: {label}" for key, label in bindings])
@@ -636,7 +678,7 @@ class DatabaseBrowserApp(App):
         if self._input_mode == "filter":
             return [("enter", "Apply"), ("esc", "Cancel")]
 
-        base = [("q", "Quit"), ("/", "Filter"), (":", "Command"), ("esc", "Back")]
+        base = [("q", "Quit"), (":", "Command"), ("esc", "Back")]
         movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
 
         if self._current_view == "rows":
@@ -651,7 +693,7 @@ class DatabaseBrowserApp(App):
                 ]
             )
 
-        return base + movement + [("enter", "Select")]
+        return base + movement + [("/", "Filter"), ("enter", "Select")]
 
     def _format_cell_value(self, value: object) -> str:
         if isinstance(value, (dict, list)):
@@ -711,7 +753,7 @@ class CellDetailScreen(ModalScreen[None]):
             self.app.copy_text_to_clipboard(self._cell_text)
 
 
-class KeyBindingFooter(Static):
+class KeyBindingBar(Static):
     pass
 
     def _can_turn_page(self) -> bool:
