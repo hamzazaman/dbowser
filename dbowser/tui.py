@@ -5,8 +5,10 @@ import subprocess
 import sys
 from typing import AsyncIterator, Protocol, Sequence, TypeVar
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.events import Key
 from textual.widgets import (
@@ -194,6 +196,8 @@ class DatabaseBrowserApp(App):
         ("a", "add_connection", "Add Connection"),
         ("w", "enter_where_mode", "Where"),
         ("o", "enter_order_mode", "Order"),
+        ("v", "toggle_block_selection", "Block Select"),
+        ("V", "toggle_row_selection", "Row Select"),
         ("/", "enter_filter_mode", "Filter"),
         (":", "enter_command_mode", "Command"),
         ("escape", "escape", "Back"),
@@ -231,6 +235,9 @@ class DatabaseBrowserApp(App):
         self._page_turn_block_until = 0.0
         self._last_g_pressed_at = 0.0
         self._gg_timeout_seconds = 0.4
+        self._selection_mode = ""
+        self._selection_anchor = Coordinate(0, 0)
+        self._rows_column_widths: list[int] = []
         self._rows_page = RowPage(
             columns=[],
             rows=[],
@@ -330,6 +337,7 @@ class DatabaseBrowserApp(App):
             return
         if self._current_view == "rows":
             self._rows_table_view().action_cursor_down()
+            self._refresh_rows_selection()
             return
         self._resource_list_view().action_cursor_down()
 
@@ -338,6 +346,7 @@ class DatabaseBrowserApp(App):
             return
         if self._current_view == "rows":
             self._rows_table_view().action_cursor_up()
+            self._refresh_rows_selection()
             return
         self._resource_list_view().action_cursor_up()
 
@@ -345,11 +354,13 @@ class DatabaseBrowserApp(App):
         if self._input_mode or self._current_view != "rows":
             return
         self._rows_table_view().action_cursor_left()
+        self._refresh_rows_selection()
 
     def action_cursor_right(self) -> None:
         if self._input_mode or self._current_view != "rows":
             return
         self._rows_table_view().action_cursor_right()
+        self._refresh_rows_selection()
 
     def action_cursor_bottom(self) -> None:
         if self._input_mode:
@@ -362,6 +373,7 @@ class DatabaseBrowserApp(App):
                 row=rows_table.row_count - 1,
                 column=rows_table.cursor_column,
             )
+            self._refresh_rows_selection()
             return
         resource_list = self._resource_list_view()
         item_count = len(resource_list.children)
@@ -371,6 +383,9 @@ class DatabaseBrowserApp(App):
 
     def action_yank_cell(self) -> None:
         if self._input_mode or self._current_view != "rows":
+            return
+        if self._selection_mode:
+            self._yank_selection()
             return
         if not self._rows_page.rows:
             self._update_message("No cell to yank.")
@@ -395,6 +410,7 @@ class DatabaseBrowserApp(App):
             return
         if not self._rows_page.has_more:
             return
+        self._clear_selection()
         self._rows_page_offset += self._rows_page_limit
         await self._load_rows()
         self._populate_rows_table(self._rows_page)
@@ -406,6 +422,7 @@ class DatabaseBrowserApp(App):
             return
         if self._rows_page_offset == 0:
             return
+        self._clear_selection()
         self._rows_page_offset = max(0, self._rows_page_offset - self._rows_page_limit)
         await self._load_rows()
         self._populate_rows_table(self._rows_page)
@@ -421,6 +438,8 @@ class DatabaseBrowserApp(App):
     async def action_escape(self) -> None:
         if self._input_mode:
             self._close_input_mode()
+            return
+        if self._clear_selection():
             return
         if await self._clear_active_filter():
             return
@@ -466,6 +485,29 @@ class DatabaseBrowserApp(App):
             column=event.coordinate.column,
             animate=False,
         )
+        self._refresh_rows_selection()
+
+    def action_toggle_block_selection(self) -> None:
+        if self._input_mode or self._current_view != "rows":
+            return
+        if self._selection_mode == "block":
+            self._clear_selection()
+            return
+        self._selection_mode = "block"
+        self._selection_anchor = self._rows_table_view().cursor_coordinate
+        self._refresh_rows_selection()
+        self._update_message("Block selection.")
+
+    def action_toggle_row_selection(self) -> None:
+        if self._input_mode or self._current_view != "rows":
+            return
+        if self._selection_mode == "row":
+            self._clear_selection()
+            return
+        self._selection_mode = "row"
+        self._selection_anchor = self._rows_table_view().cursor_coordinate
+        self._refresh_rows_selection()
+        self._update_message("Row selection.")
 
     def on_key(self, event: Key) -> None:
         if event.key == "enter":
@@ -558,6 +600,7 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             rows_table = self._rows_table_view()
             rows_table.move_cursor(row=0, column=rows_table.cursor_column)
+            self._refresh_rows_selection()
             return
         resource_list = self._resource_list_view()
         if len(resource_list.children) == 0:
@@ -578,6 +621,7 @@ class DatabaseBrowserApp(App):
         self._selected_schema_name = ""
         self._selected_table_name = ""
         self._rows_page_offset = 0
+        self._clear_selection()
         self._update_status()
         await self._load_schemas()
         await self._set_view("schema")
@@ -588,6 +632,7 @@ class DatabaseBrowserApp(App):
         self._selected_schema_name = resource_list.highlighted_child.schema_name
         self._selected_table_name = ""
         self._rows_page_offset = 0
+        self._clear_selection()
         self._update_status()
         await self._load_tables()
         await self._set_view("table")
@@ -598,6 +643,7 @@ class DatabaseBrowserApp(App):
         self._selected_table_name = resource_list.highlighted_child.table_name
         self._rows_page_offset = 0
         self._rows_order_by_clause = ""
+        self._clear_selection()
         self._update_status()
         self._show_rows_loading_state()
         await self._load_rows()
@@ -764,6 +810,7 @@ class DatabaseBrowserApp(App):
     async def _apply_where_clause(self, where_clause: str) -> None:
         self._rows_where_clause = where_clause
         self._rows_page_offset = 0
+        self._clear_selection()
         self._update_message("WHERE applied.")
         self._update_status()
         self._update_keybinds()
@@ -773,6 +820,7 @@ class DatabaseBrowserApp(App):
     async def _apply_order_by_clause(self, order_by_clause: str) -> None:
         self._rows_order_by_clause = order_by_clause
         self._rows_page_offset = 0
+        self._clear_selection()
         self._update_message("ORDER BY applied.")
         self._update_status()
         self._update_keybinds()
@@ -973,14 +1021,21 @@ class DatabaseBrowserApp(App):
             max_cell_width = len(column_name)
             for formatted_row in formatted_rows:
                 if column_index < len(formatted_row):
-                    max_cell_width = max(
-                        max_cell_width, len(formatted_row[column_index])
-                    )
+                    max_cell_width = max(max_cell_width, len(formatted_row[column_index]))
             column_widths.append(min(max_cell_width, self._max_table_cell_width))
+        self._rows_column_widths = column_widths
         for column_name, width in zip(row_page.columns, column_widths, strict=False):
             rows_table.add_column(column_name, width=width or 1)
-        for formatted_row in formatted_rows:
-            rows_table.add_row(*formatted_row)
+        for row_index, formatted_row in enumerate(formatted_rows):
+            styled_row = [
+                self._render_table_cell(
+                    cell_text,
+                    row_index,
+                    column_index,
+                )
+                for column_index, cell_text in enumerate(formatted_row)
+            ]
+            rows_table.add_row(*styled_row)
         if rows_table.row_count:
             rows_table.move_cursor(row=0, column=0, animate=False)
         self._update_status()
@@ -996,6 +1051,96 @@ class DatabaseBrowserApp(App):
             has_more=False,
         )
         self._populate_rows_table(self._rows_page)
+
+    def _selection_active(self) -> bool:
+        return self._selection_mode in {"block", "row"}
+
+    def _selection_bounds(self) -> tuple[int, int, int, int]:
+        row_count = len(self._rows_page.rows)
+        column_count = len(self._rows_page.columns)
+        if row_count == 0 or column_count == 0:
+            return 0, -1, 0, -1
+        anchor = self._selection_anchor
+        cursor = self._rows_table_view().cursor_coordinate
+        row_start = max(0, min(anchor.row, cursor.row))
+        row_end = min(row_count - 1, max(anchor.row, cursor.row))
+        if self._selection_mode == "row":
+            return row_start, row_end, 0, column_count - 1
+        column_start = max(0, min(anchor.column, cursor.column))
+        column_end = min(column_count - 1, max(anchor.column, cursor.column))
+        return row_start, row_end, column_start, column_end
+
+    def _cell_selected(self, row_index: int, column_index: int) -> bool:
+        if not self._selection_active():
+            return False
+        row_start, row_end, column_start, column_end = self._selection_bounds()
+        return (
+            row_start <= row_index <= row_end
+            and column_start <= column_index <= column_end
+        )
+
+    def _render_table_cell(
+        self,
+        cell_text: str,
+        row_index: int,
+        column_index: int,
+    ) -> str | Text:
+        if not self._cell_selected(row_index, column_index):
+            return cell_text
+        width = len(cell_text)
+        if 0 <= column_index < len(self._rows_column_widths):
+            width = self._rows_column_widths[column_index]
+        padded_text = Text(cell_text, style="reverse", no_wrap=True)
+        if len(cell_text) < width:
+            padded_text.pad_right(width - len(cell_text))
+        return padded_text
+
+    def _refresh_rows_selection(self) -> None:
+        if self._current_view != "rows":
+            return
+        if not self._rows_page.columns:
+            return
+        rows_table = self._rows_table_view()
+        if rows_table.row_count == 0:
+            return
+        for row_index, row in enumerate(self._rows_page.rows):
+            for column_index, cell_value in enumerate(row):
+                cell_text = self._format_cell_value_for_table(cell_value)
+                rows_table.update_cell_at(
+                    Coordinate(row_index, column_index),
+                    self._render_table_cell(cell_text, row_index, column_index),
+                )
+
+    def _clear_selection(self) -> bool:
+        if not self._selection_mode:
+            return False
+        self._selection_mode = ""
+        self._selection_anchor = Coordinate(0, 0)
+        self._refresh_rows_selection()
+        self._update_message("")
+        return True
+
+    def _yank_selection(self) -> None:
+        if not self._selection_mode:
+            self._update_message("No selection to yank.")
+            return
+        row_start, row_end, column_start, column_end = self._selection_bounds()
+        if row_end < row_start or column_end < column_start:
+            self._update_message("No selection to yank.")
+            return
+        lines: list[str] = []
+        for row_index in range(row_start, row_end + 1):
+            if row_index >= len(self._rows_page.rows):
+                continue
+            row = self._rows_page.rows[row_index]
+            values: list[str] = []
+            for column_index in range(column_start, column_end + 1):
+                if column_index >= len(row):
+                    continue
+                values.append(self._format_cell_value_full(row[column_index]))
+            lines.append("\t".join(values))
+        self.copy_text_to_clipboard("\n".join(lines))
+        self._update_message("Yanked selection to clipboard.")
 
     def _filter_items(
         self,
@@ -1131,6 +1276,8 @@ class DatabaseBrowserApp(App):
                     ("h/l", "Left/Right"),
                     ("w", "Where"),
                     ("o", "Order By"),
+                    ("v", "Block Select"),
+                    ("V", "Row Select"),
                     (": pagesize N", "Rows/Page"),
                     ("enter", "View Cell"),
                     ("y", "Yank"),
