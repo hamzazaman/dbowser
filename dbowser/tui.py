@@ -17,6 +17,7 @@ from textual.widgets import (
     ListView,
     Static,
 )
+from textual.widgets._input import Selection
 
 from dbowser.postgres_driver import (
     ConnectionParameters,
@@ -99,6 +100,30 @@ class DatabaseBrowserApp(App):
     #rows-table {
         height: 1fr;
     }
+
+    ErrorDialog {
+        align: center middle;
+    }
+
+    #error-dialog {
+        width: 70%;
+        max-width: 90;
+        height: auto;
+        max-height: 60%;
+        padding: 1 2;
+        background: rgb(90, 10, 10);
+        border: heavy rgb(200, 60, 60);
+        color: rgb(255, 230, 230);
+        align: center middle;
+    }
+
+    #error-title {
+        text-style: bold;
+    }
+
+    #error-message {
+        text-wrap: wrap;
+    }
     """
 
     BINDINGS = [
@@ -111,7 +136,7 @@ class DatabaseBrowserApp(App):
         ("n", "next_page", "Next Page"),
         ("p", "previous_page", "Prev Page"),
         ("G", "cursor_bottom", "Bottom"),
-        ("ctrl+p", "enter_command_mode", "Command"),
+        ("ctrl+p", "enter_palette_mode", "Palette"),
         ("w", "enter_where_mode", "Where"),
         ("/", "enter_filter_mode", "Filter"),
         (":", "enter_command_mode", "Command"),
@@ -152,6 +177,7 @@ class DatabaseBrowserApp(App):
             has_more=False,
         )
         self._rows_where_clause = ""
+        self._error_dialog_open = False
         self._resource_filters: dict[str, str] = {
             "database": "",
             "schema": "",
@@ -204,6 +230,9 @@ class DatabaseBrowserApp(App):
 
     def action_enter_command_mode(self) -> None:
         self._enter_input_mode("command")
+
+    def action_enter_palette_mode(self) -> None:
+        self._enter_input_mode("palette")
 
     def action_enter_where_mode(self) -> None:
         if self._current_view != "rows":
@@ -328,13 +357,15 @@ class DatabaseBrowserApp(App):
         if event.input.id != "command-input":
             return
         submitted_value = self._strip_prompt_prefix(event.value.strip())
-        if self._input_mode == "filter":
-            await self._apply_filter(submitted_value)
-        elif self._input_mode == "where":
-            await self._apply_where_clause(submitted_value)
-        elif self._input_mode == "command":
-            await self._run_command(submitted_value)
-        self._close_input_mode()
+        try:
+            if self._input_mode == "filter":
+                await self._apply_filter(submitted_value)
+            elif self._input_mode == "where":
+                await self._apply_where_clause(submitted_value)
+            elif self._input_mode in {"command", "palette"}:
+                await self._run_command(submitted_value)
+        finally:
+            self._close_input_mode()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "resource-list":
@@ -370,7 +401,7 @@ class DatabaseBrowserApp(App):
         page_text = ""
         if self._current_view == "rows":
             page_number = (self._rows_page_offset // self._rows_page_limit) + 1
-            page_text = f" | page: {page_number}"
+            page_text = f" | page: {page_number} ({self._rows_page_limit}/page)"
             if self._rows_where_clause:
                 page_text += f" | where: {self._rows_where_clause}"
         filter_text = ""
@@ -543,6 +574,8 @@ class DatabaseBrowserApp(App):
             command_input.placeholder = "Filter"
         elif mode == "where":
             command_input.placeholder = "WHERE clause"
+        elif mode == "palette":
+            command_input.placeholder = "Palette (q to quit)"
         else:
             command_input.placeholder = "Command (q to quit)"
         if mode == "filter":
@@ -551,6 +584,8 @@ class DatabaseBrowserApp(App):
             )
         elif mode == "where":
             command_input.value = self._rows_where_clause
+        elif mode == "palette":
+            command_input.value = ""
         else:
             command_input.value = ":"
         command_input.select_on_focus = False
@@ -564,6 +599,8 @@ class DatabaseBrowserApp(App):
             where_bar = self.query_one("#where-bar", Static)
             where_bar.display = True
             where_bar.update(self._where_text())
+        elif mode == "palette":
+            self._update_message("PALETTE:")
         else:
             self._update_message("COMMAND:")
         self._update_keybinds()
@@ -603,6 +640,8 @@ class DatabaseBrowserApp(App):
             return
         if await self._handle_focus_command(command_text):
             return
+        if await self._handle_page_size_command(command_text):
+            return
         self._update_message(f"Unknown command: {command_text}")
 
     async def _handle_focus_command(self, command_text: str) -> bool:
@@ -626,6 +665,29 @@ class DatabaseBrowserApp(App):
             return True
         await self._set_view(target_view)
         self._update_message(f"Focused {normalized}")
+        return True
+
+    async def _handle_page_size_command(self, command_text: str) -> bool:
+        normalized = command_text.strip().lower()
+        if not normalized.startswith(("pagesize ", "perpage ")):
+            return False
+        parts = normalized.split(maxsplit=1)
+        if len(parts) != 2:
+            return True
+        try:
+            page_size = int(parts[1])
+        except ValueError:
+            self._update_message("Page size must be a number.")
+            return True
+        if page_size <= 0:
+            self._update_message("Page size must be greater than 0.")
+            return True
+        self._rows_page_limit = page_size
+        self._rows_page_offset = 0
+        self._update_message(f"Rows per page set to {page_size}.")
+        self._update_status()
+        if self._current_view == "rows":
+            await self._refresh_view()
         return True
 
     async def _refresh_view(self) -> None:
@@ -770,6 +832,7 @@ class DatabaseBrowserApp(App):
 
     def _set_input_cursor_to_end(self, input_field: Input) -> None:
         input_field.cursor_position = len(input_field.value)
+        input_field.selection = Selection.cursor(input_field.cursor_position)
     def _strip_prompt_prefix(self, value: str) -> str:
         if value.startswith(("/", ":")):
             return value[1:].lstrip()
@@ -797,10 +860,12 @@ class DatabaseBrowserApp(App):
     def _footer_bindings(self) -> list[tuple[str, str]]:
         if self._input_mode == "command":
             return [("enter", "Run"), ("esc", "Cancel")]
+        if self._input_mode == "palette":
+            return [("enter", "Run"), ("esc", "Cancel")]
         if self._input_mode == "filter":
             return [("enter", "Apply"), ("esc", "Cancel")]
 
-        base = [("q", "Quit"), ("^p", "Command"), (":", "Command"), ("esc", "Back")]
+        base = [("q", "Quit"), (":", "Command"), ("esc", "Back"), ("^p", "Palette")]
         movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
 
         if self._current_view == "rows":
@@ -810,6 +875,7 @@ class DatabaseBrowserApp(App):
                 + [
                     ("h/l", "Left/Right"),
                     ("w", "Where"),
+                    (": pagesize N", "Rows/Page"),
                     ("enter", "View Cell"),
                     ("y", "Yank"),
                     ("n/p", "Page"),
@@ -856,6 +922,11 @@ class DatabaseBrowserApp(App):
         self.push_screen(CellDetailScreen(self._format_cell_value_full(cell_value)))
 
     def _show_error_dialog(self, title: str, error: Exception) -> None:
+        if self._input_mode:
+            self._close_input_mode()
+        if self._error_dialog_open:
+            return
+        self._error_dialog_open = True
         self.push_screen(ErrorDialog(title, str(error)))
 
 
@@ -896,6 +967,18 @@ class ErrorDialog(ModalScreen[None]):
         self._message = message
 
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static(self._title)
-            yield Static(self._message)
+        with Vertical(id="error-dialog"):
+            yield Static(self._title, id="error-title")
+            yield Static(self._message, id="error-message")
+
+    def on_mount(self) -> None:
+        self.focus()
+
+    def on_key(self, event: Key) -> None:
+        if event.key == "escape":
+            self.dismiss()
+            event.stop()
+
+    def on_unmount(self) -> None:
+        if isinstance(self.app, DatabaseBrowserApp):
+            self.app._error_dialog_open = False
