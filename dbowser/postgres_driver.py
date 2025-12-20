@@ -35,6 +35,7 @@ class SchemaInfo:
 @dataclass(frozen=True)
 class TableInfo:
     name: str
+    estimated_rows: int
 
 
 @dataclass(frozen=True)
@@ -156,13 +157,26 @@ async def list_schemas(
 
 async def _fetch_tables(connection: Connection, schema_name: str) -> list[TableInfo]:
     query = """
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = $1
-        ORDER BY table_name
+        SELECT
+            c.relname AS table_name,
+            CASE
+                WHEN c.reltuples < 0 THEN 0
+                ELSE c.reltuples::bigint
+            END AS estimated_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1
+          AND c.relkind = 'r'
+        ORDER BY c.relname
     """
     rows = await connection.fetch(query, schema_name)
-    return [TableInfo(name=row["table_name"]) for row in rows]
+    return [
+        TableInfo(
+            name=row["table_name"],
+            estimated_rows=row["estimated_rows"],
+        )
+        for row in rows
+    ]
 
 
 async def list_tables(

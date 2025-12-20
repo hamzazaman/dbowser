@@ -1,16 +1,16 @@
 import json
+from contextlib import asynccontextmanager
 import time
 import subprocess
 import sys
-from typing import Protocol, Sequence, TypeVar
+from typing import AsyncIterator, Protocol, Sequence, TypeVar
 
 from textual.app import App, ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.events import Key
 from textual.widgets import (
     DataTable,
-    Footer,
     Header,
     Input,
     ListItem,
@@ -44,8 +44,9 @@ class SchemaListItem(ListItem):
 
 
 class TableListItem(ListItem):
-    def __init__(self, table_name: str) -> None:
-        super().__init__(Static(table_name))
+    def __init__(self, table_name: str, estimated_rows: int) -> None:
+        label = f"{table_name}  (~{estimated_rows})"
+        super().__init__(Static(label))
         self.table_name = table_name
 
 
@@ -59,6 +60,25 @@ NamedItemT = TypeVar("NamedItemT", bound=_NamedItem)
 
 
 class DatabaseBrowserApp(App):
+    DEFAULT_CSS = """
+    #top-bar {
+        height: 1;
+    }
+
+    #selected-status {
+        width: 1fr;
+    }
+
+    #loading-indicator {
+        width: auto;
+        content-align: right middle;
+    }
+
+    #keybinds-footer {
+        height: 1;
+    }
+    """
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("j", "cursor_down", "Down"),
@@ -117,12 +137,14 @@ class DatabaseBrowserApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
-            yield Static(self._status_text(), id="selected-status")
+            with Horizontal(id="top-bar"):
+                yield Static(self._status_text(), id="selected-status")
+                yield Static("", id="loading-indicator")
             yield Static("", id="message-line")
             yield ListView(id="resource-list")
             yield DataTable(id="rows-table")
             yield Input(placeholder="Command", id="command-input")
-        yield Footer()
+            yield KeyBindingFooter(id="keybinds-footer")
 
     async def on_mount(self) -> None:
         await self._refresh_view()
@@ -131,6 +153,7 @@ class DatabaseBrowserApp(App):
         rows_table.display = False
         command_input = self.query_one("#command-input", Input)
         command_input.display = False
+        self._update_footer()
 
     async def action_select_resource(self) -> None:
         if self._input_mode:
@@ -301,6 +324,22 @@ class DatabaseBrowserApp(App):
         message_line = self.query_one("#message-line", Static)
         message_line.update(message)
 
+    def _update_footer(self) -> None:
+        footer = self.query_one("#keybinds-footer", KeyBindingFooter)
+        footer.update(self._footer_text())
+
+    def _set_loading(self, is_loading: bool, message: str = "Loading...") -> None:
+        loading_indicator = self.query_one("#loading-indicator", Static)
+        loading_indicator.update(message if is_loading else "")
+
+    @asynccontextmanager
+    async def _loading(self, message: str) -> AsyncIterator[None]:
+        self._set_loading(True, message)
+        try:
+            yield
+        finally:
+            self._set_loading(False)
+
     def _resource_list_view(self) -> ListView:
         return self.query_one("#resource-list", ListView)
 
@@ -355,7 +394,8 @@ class DatabaseBrowserApp(App):
             self._base_connection_parameters,
             self._selected_database_name,
         )
-        self._schemas = await list_schemas(selected_parameters)
+        async with self._loading("Loading schemas..."):
+            self._schemas = await list_schemas(selected_parameters)
         self._tables = []
 
     async def _load_tables(self) -> None:
@@ -366,7 +406,11 @@ class DatabaseBrowserApp(App):
             self._base_connection_parameters,
             self._selected_database_name,
         )
-        self._tables = await list_tables(selected_parameters, self._selected_schema_name)
+        async with self._loading("Loading tables..."):
+            self._tables = await list_tables(
+                selected_parameters,
+                self._selected_schema_name,
+            )
 
     async def _load_rows(self) -> None:
         if (
@@ -386,13 +430,14 @@ class DatabaseBrowserApp(App):
             self._base_connection_parameters,
             self._selected_database_name,
         )
-        self._rows_page = await list_rows(
-            selected_parameters,
-            self._selected_schema_name,
-            self._selected_table_name,
-            self._rows_page_limit,
-            self._rows_page_offset,
-        )
+        async with self._loading("Loading rows..."):
+            self._rows_page = await list_rows(
+                selected_parameters,
+                self._selected_schema_name,
+                self._selected_table_name,
+                self._rows_page_limit,
+                self._rows_page_offset,
+            )
 
     def _enter_input_mode(self, mode: str) -> None:
         if self._input_mode:
@@ -408,6 +453,7 @@ class DatabaseBrowserApp(App):
             command_input.value = ""
         command_input.display = True
         command_input.focus()
+        self._update_footer()
 
     def _close_input_mode(self) -> None:
         command_input = self.query_one("#command-input", Input)
@@ -418,6 +464,7 @@ class DatabaseBrowserApp(App):
             self._rows_table_view().focus()
         else:
             self._resource_list_view().focus()
+        self._update_footer()
 
     async def _apply_filter(self, filter_text: str) -> None:
         self._resource_filters[self._current_view] = filter_text
@@ -496,7 +543,12 @@ class DatabaseBrowserApp(App):
                 self._resource_filters["table"],
             )
             for table in filtered:
-                resource_list.append(TableListItem(table.name))
+                resource_list.append(
+                    TableListItem(
+                        table.name,
+                        table.estimated_rows,
+                    )
+                )
             return
         if self._current_view == "rows":
             self._show_rows_table()
@@ -516,6 +568,7 @@ class DatabaseBrowserApp(App):
         self._current_view = target_view
         self._update_status()
         await self._refresh_view()
+        self._update_footer()
 
     async def _pop_view_history(self) -> None:
         if not self._view_history:
@@ -526,6 +579,7 @@ class DatabaseBrowserApp(App):
         self._current_view = previous_view
         self._update_status()
         await self._refresh_view()
+        self._update_footer()
 
     def _show_resource_list(self) -> None:
         resource_list = self._resource_list_view()
@@ -571,6 +625,33 @@ class DatabaseBrowserApp(App):
         if not filter_text:
             return list(items)
         return [item for item in items if filter_text.lower() in item.name.lower()]
+
+    def _footer_text(self) -> str:
+        bindings = self._footer_bindings()
+        return "  ".join([f"{key}: {label}" for key, label in bindings])
+
+    def _footer_bindings(self) -> list[tuple[str, str]]:
+        if self._input_mode == "command":
+            return [("enter", "Run"), ("esc", "Cancel")]
+        if self._input_mode == "filter":
+            return [("enter", "Apply"), ("esc", "Cancel")]
+
+        base = [("q", "Quit"), ("/", "Filter"), (":", "Command"), ("esc", "Back")]
+        movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
+
+        if self._current_view == "rows":
+            return (
+                base
+                + movement
+                + [
+                    ("h/l", "Left/Right"),
+                    ("enter", "View Cell"),
+                    ("y", "Yank"),
+                    ("n/p", "Page"),
+                ]
+            )
+
+        return base + movement + [("enter", "Select")]
 
     def _format_cell_value(self, value: object) -> str:
         if isinstance(value, (dict, list)):
@@ -628,6 +709,10 @@ class CellDetailScreen(ModalScreen[None]):
     def action_yank(self) -> None:
         if isinstance(self.app, DatabaseBrowserApp):
             self.app.copy_text_to_clipboard(self._cell_text)
+
+
+class KeyBindingFooter(Static):
+    pass
 
     def _can_turn_page(self) -> bool:
         now = time.monotonic()
