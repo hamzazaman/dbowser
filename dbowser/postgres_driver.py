@@ -1,11 +1,16 @@
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import os
-from typing import Iterable
+import re
+from typing import AsyncIterator, Iterable
 from urllib.parse import urlparse
 
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extensions import connection as PostgresConnection
+import asyncpg
+from asyncpg import Connection
+
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -64,29 +69,39 @@ def _parse_connection_parameters(connection_url: str) -> ConnectionParameters:
     )
 
 
-def _open_connection(connection_parameters: ConnectionParameters) -> PostgresConnection:
-    connection = psycopg2.connect(
+def _validate_identifier(name: str, label: str) -> None:
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(f"Invalid {label} identifier: {name}")
+
+
+@asynccontextmanager
+async def _open_connection(
+    connection_parameters: ConnectionParameters,
+) -> AsyncIterator[Connection]:
+    connection = await asyncpg.connect(
         host=connection_parameters.host,
         port=connection_parameters.port,
         user=connection_parameters.username,
         password=connection_parameters.password,
-        dbname=connection_parameters.database_name,
+        database=connection_parameters.database_name,
     )
-    connection.set_session(readonly=True, autocommit=True)
-    return connection
+    try:
+        await connection.execute("SET default_transaction_read_only = on")
+        await connection.execute("SET statement_timeout = '10s'")
+        yield connection
+    finally:
+        await connection.close()
 
 
-def _fetch_databases(connection: PostgresConnection) -> list[DatabaseInfo]:
+async def _fetch_databases(connection: Connection) -> list[DatabaseInfo]:
     query = """
         SELECT datname
         FROM pg_database
         WHERE datistemplate = false
         ORDER BY datname
     """
-    with connection.cursor() as cursor:
-        cursor.execute(query)
-        rows = cursor.fetchall()
-    return [DatabaseInfo(name=row[0]) for row in rows]
+    rows = await connection.fetch(query)
+    return [DatabaseInfo(name=row["datname"]) for row in rows]
 
 
 def _prompt_for_database_selection(databases: Iterable[DatabaseInfo]) -> DatabaseInfo:
@@ -110,75 +125,74 @@ def load_connection_parameters_from_env() -> ConnectionParameters:
     return _parse_connection_parameters(connection_url)
 
 
-def list_databases(connection_parameters: ConnectionParameters) -> list[DatabaseInfo]:
-    with _open_connection(connection_parameters) as connection:
-        return _fetch_databases(connection)
+async def list_databases(
+    connection_parameters: ConnectionParameters,
+) -> list[DatabaseInfo]:
+    async with _open_connection(connection_parameters) as connection:
+        return await _fetch_databases(connection)
 
 
-def list_databases_from_env() -> list[DatabaseInfo]:
+async def list_databases_from_env() -> list[DatabaseInfo]:
     connection_parameters = load_connection_parameters_from_env()
-    return list_databases(connection_parameters)
+    return await list_databases(connection_parameters)
 
 
-def _fetch_schemas(connection: PostgresConnection) -> list[SchemaInfo]:
+async def _fetch_schemas(connection: Connection) -> list[SchemaInfo]:
     query = """
         SELECT schema_name
         FROM information_schema.schemata
         ORDER BY schema_name
     """
-    with connection.cursor() as cursor:
-        cursor.execute(query)
-        rows = cursor.fetchall()
-    return [SchemaInfo(name=row[0]) for row in rows]
+    rows = await connection.fetch(query)
+    return [SchemaInfo(name=row["schema_name"]) for row in rows]
 
 
-def list_schemas(connection_parameters: ConnectionParameters) -> list[SchemaInfo]:
-    with _open_connection(connection_parameters) as connection:
-        return _fetch_schemas(connection)
+async def list_schemas(
+    connection_parameters: ConnectionParameters,
+) -> list[SchemaInfo]:
+    async with _open_connection(connection_parameters) as connection:
+        return await _fetch_schemas(connection)
 
 
-def _fetch_tables(connection: PostgresConnection, schema_name: str) -> list[TableInfo]:
+async def _fetch_tables(connection: Connection, schema_name: str) -> list[TableInfo]:
     query = """
         SELECT table_name
         FROM information_schema.tables
-        WHERE table_schema = %s
+        WHERE table_schema = $1
         ORDER BY table_name
     """
-    with connection.cursor() as cursor:
-        cursor.execute(query, (schema_name,))
-        rows = cursor.fetchall()
-    return [TableInfo(name=row[0]) for row in rows]
+    rows = await connection.fetch(query, schema_name)
+    return [TableInfo(name=row["table_name"]) for row in rows]
 
 
-def list_tables(
+async def list_tables(
     connection_parameters: ConnectionParameters,
     schema_name: str,
 ) -> list[TableInfo]:
-    with _open_connection(connection_parameters) as connection:
-        return _fetch_tables(connection, schema_name)
+    async with _open_connection(connection_parameters) as connection:
+        return await _fetch_tables(connection, schema_name)
 
 
-def list_rows(
+async def list_rows(
     connection_parameters: ConnectionParameters,
     schema_name: str,
     table_name: str,
     limit: int,
     offset: int,
 ) -> RowPage:
-    query = sql.SQL("SELECT * FROM {}.{} LIMIT %s OFFSET %s").format(
-        sql.Identifier(schema_name),
-        sql.Identifier(table_name),
-    )
-    with _open_connection(connection_parameters) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query, (limit + 1, offset))
-            rows = cursor.fetchall()
-            columns = [column.name for column in cursor.description]
-    has_more = len(rows) > limit
-    trimmed_rows = rows[:limit]
+    _validate_identifier(schema_name, "schema")
+    _validate_identifier(table_name, "table")
+    query = f'SELECT * FROM "{schema_name}"."{table_name}" LIMIT $1 OFFSET $2'
+    async with _open_connection(connection_parameters) as connection:
+        statement = await connection.prepare(query)
+        columns = [attribute.name for attribute in statement.get_attributes()]
+        records = await statement.fetch(limit + 1, offset)
+    has_more = len(records) > limit
+    trimmed_records = records[:limit]
+    rows = [tuple(record) for record in trimmed_records]
     return RowPage(
         columns=columns,
-        rows=trimmed_rows,
+        rows=rows,
         limit=limit,
         offset=offset,
         has_more=has_more,
@@ -198,9 +212,9 @@ def build_database_connection_parameters(
     )
 
 
-def connect_with_selection() -> None:
+async def connect_with_selection() -> None:
     base_parameters = load_connection_parameters_from_env()
-    databases = list_databases(base_parameters)
+    databases = await list_databases(base_parameters)
 
     selected_database = _prompt_for_database_selection(databases)
     selected_parameters = build_database_connection_parameters(
@@ -208,11 +222,10 @@ def connect_with_selection() -> None:
         selected_database.name,
     )
 
-    with _open_connection(selected_parameters) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT current_database()")
-            current_database_row = cursor.fetchone()
-            if current_database_row is None:
-                raise ValueError("Expected current_database() to return a value.")
-            current_database = current_database_row[0]
-    print(f"Connected to database: {current_database}")
+    async with _open_connection(selected_parameters) as connection:
+        row = await connection.fetchrow("SELECT current_database() AS name")
+    print(f"Connected to database: {row['name']}")
+
+
+def connect_with_selection_sync() -> None:
+    asyncio.run(connect_with_selection())

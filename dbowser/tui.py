@@ -1,10 +1,13 @@
 import json
+import time
 import subprocess
 import sys
 from typing import Protocol, Sequence, TypeVar
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
+from textual.screen import ModalScreen
+from textual.events import Key
 from textual.widgets import (
     DataTable,
     Footer,
@@ -65,6 +68,7 @@ class DatabaseBrowserApp(App):
         ("y", "yank_cell", "Yank Cell"),
         ("n", "next_page", "Next Page"),
         ("p", "previous_page", "Prev Page"),
+        ("G", "cursor_bottom", "Bottom"),
         ("/", "enter_filter_mode", "Filter"),
         (":", "enter_command_mode", "Command"),
         ("escape", "escape", "Back"),
@@ -90,7 +94,12 @@ class DatabaseBrowserApp(App):
         self._current_view = "database"
         self._view_history: list[str] = []
         self._rows_page_limit = 100
+        self._max_table_cell_width = 75
         self._rows_page_offset = 0
+        self._page_turn_cooldown_seconds = 0.25
+        self._last_page_turn_at = 0.0
+        self._last_g_pressed_at = 0.0
+        self._gg_timeout_seconds = 0.4
         self._rows_page = RowPage(
             columns=[],
             rows=[],
@@ -115,24 +124,26 @@ class DatabaseBrowserApp(App):
             yield Input(placeholder="Command", id="command-input")
         yield Footer()
 
-    def on_mount(self) -> None:
-        self._refresh_view()
+    async def on_mount(self) -> None:
+        await self._refresh_view()
         self._resource_list_view().focus()
         rows_table = self.query_one("#rows-table", DataTable)
         rows_table.display = False
         command_input = self.query_one("#command-input", Input)
         command_input.display = False
 
-    def action_select_resource(self) -> None:
+    async def action_select_resource(self) -> None:
         if self._input_mode:
             return
         resource_list = self._resource_list_view()
         if self._current_view == "database":
-            self._select_database(resource_list)
+            await self._select_database(resource_list)
         elif self._current_view == "schema":
-            self._select_schema(resource_list)
+            await self._select_schema(resource_list)
         elif self._current_view == "table":
-            self._select_table(resource_list)
+            await self._select_table(resource_list)
+        elif self._current_view == "rows":
+            self._show_cell_detail()
 
     def action_enter_filter_mode(self) -> None:
         self._enter_input_mode("filter")
@@ -166,23 +177,23 @@ class DatabaseBrowserApp(App):
             return
         self._rows_table_view().action_cursor_right()
 
-    def action_next_page(self) -> None:
-        if self._input_mode or self._current_view != "rows":
+    def action_cursor_bottom(self) -> None:
+        if self._input_mode:
             return
-        if not self._rows_page.has_more:
+        if self._current_view == "rows":
+            rows_table = self._rows_table_view()
+            if rows_table.row_count == 0:
+                return
+            rows_table.move_cursor(
+                row=rows_table.row_count - 1,
+                column=rows_table.cursor_column,
+            )
             return
-        self._rows_page_offset += self._rows_page_limit
-        self._load_rows()
-        self._populate_rows_table(self._rows_page)
-
-    def action_previous_page(self) -> None:
-        if self._input_mode or self._current_view != "rows":
+        resource_list = self._resource_list_view()
+        item_count = len(resource_list.children)
+        if item_count == 0:
             return
-        if self._rows_page_offset == 0:
-            return
-        self._rows_page_offset = max(0, self._rows_page_offset - self._rows_page_limit)
-        self._load_rows()
-        self._populate_rows_table(self._rows_page)
+        resource_list.index = item_count - 1
 
     def action_yank_cell(self) -> None:
         if self._input_mode or self._current_view != "rows":
@@ -191,37 +202,82 @@ class DatabaseBrowserApp(App):
             self._update_message("No cell to yank.")
             return
         rows_table = self._rows_table_view()
-        cell_value = rows_table.get_cell_at(rows_table.cursor_coordinate)
-        self._copy_to_clipboard(self._format_cell_value(cell_value))
+        coordinate = rows_table.cursor_coordinate
+        if coordinate.row >= len(self._rows_page.rows):
+            self._update_message("No cell to yank.")
+            return
+        row = self._rows_page.rows[coordinate.row]
+        if coordinate.column >= len(row):
+            self._update_message("No cell to yank.")
+            return
+        cell_value = row[coordinate.column]
+        self.copy_text_to_clipboard(self._format_cell_value_full(cell_value))
         self._update_message("Yanked cell to clipboard.")
 
-    def _copy_to_clipboard(self, text: str) -> None:
-        self.copy_to_clipboard(text)
-        if sys.platform == "darwin":
-            subprocess.run(["pbcopy"], input=text, text=True, check=True)
+    async def action_next_page(self) -> None:
+        if self._input_mode or self._current_view != "rows":
+            return
+        if not self._can_turn_page():
+            return
+        if not self._rows_page.has_more:
+            return
+        self._rows_page_offset += self._rows_page_limit
+        await self._load_rows()
+        self._populate_rows_table(self._rows_page)
 
-    def action_escape(self) -> None:
+    async def action_previous_page(self) -> None:
+        if self._input_mode or self._current_view != "rows":
+            return
+        if not self._can_turn_page():
+            return
+        if self._rows_page_offset == 0:
+            return
+        self._rows_page_offset = max(0, self._rows_page_offset - self._rows_page_limit)
+        await self._load_rows()
+        self._populate_rows_table(self._rows_page)
+
+    async def action_escape(self) -> None:
         if self._input_mode:
             self._close_input_mode()
             return
-        self._pop_view_history()
+        await self._pop_view_history()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "command-input":
             return
         submitted_value = event.value.strip()
         if self._input_mode == "filter":
-            self._apply_filter(submitted_value)
+            await self._apply_filter(submitted_value)
         elif self._input_mode == "command":
-            self._run_command(submitted_value)
+            await self._run_command(submitted_value)
         self._close_input_mode()
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
+    async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "resource-list":
             return
         if self._input_mode:
             return
-        self.action_select_resource()
+        await self.action_select_resource()
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        if event.data_table.id != "rows-table":
+            return
+        if self._input_mode or self._current_view != "rows":
+            return
+        self._show_cell_detail()
+
+    def on_key(self, event: Key) -> None:
+        if event.key != "g":
+            return
+        if self._input_mode:
+            return
+        now = time.monotonic()
+        if now - self._last_g_pressed_at <= self._gg_timeout_seconds:
+            self._last_g_pressed_at = 0.0
+            self._jump_to_top()
+            event.stop()
+            return
+        self._last_g_pressed_at = now
 
     def _status_text(self) -> str:
         database_text = self._selected_database_name or "<none>"
@@ -251,7 +307,17 @@ class DatabaseBrowserApp(App):
     def _rows_table_view(self) -> DataTable:
         return self.query_one("#rows-table", DataTable)
 
-    def _select_database(self, resource_list: ListView) -> None:
+    def _jump_to_top(self) -> None:
+        if self._current_view == "rows":
+            rows_table = self._rows_table_view()
+            rows_table.move_cursor(row=0, column=rows_table.cursor_column)
+            return
+        resource_list = self._resource_list_view()
+        if len(resource_list.children) == 0:
+            return
+        resource_list.index = 0
+
+    async def _select_database(self, resource_list: ListView) -> None:
         if not isinstance(resource_list.highlighted_child, DatabaseListItem):
             return
         self._selected_database_name = resource_list.highlighted_child.database_name
@@ -259,29 +325,29 @@ class DatabaseBrowserApp(App):
         self._selected_table_name = ""
         self._rows_page_offset = 0
         self._update_status()
-        self._load_schemas()
-        self._set_view("schema")
+        await self._load_schemas()
+        await self._set_view("schema")
 
-    def _select_schema(self, resource_list: ListView) -> None:
+    async def _select_schema(self, resource_list: ListView) -> None:
         if not isinstance(resource_list.highlighted_child, SchemaListItem):
             return
         self._selected_schema_name = resource_list.highlighted_child.schema_name
         self._selected_table_name = ""
         self._rows_page_offset = 0
         self._update_status()
-        self._load_tables()
-        self._set_view("table")
+        await self._load_tables()
+        await self._set_view("table")
 
-    def _select_table(self, resource_list: ListView) -> None:
+    async def _select_table(self, resource_list: ListView) -> None:
         if not isinstance(resource_list.highlighted_child, TableListItem):
             return
         self._selected_table_name = resource_list.highlighted_child.table_name
         self._rows_page_offset = 0
         self._update_status()
-        self._load_rows()
-        self._set_view("rows")
+        await self._load_rows()
+        await self._set_view("rows")
 
-    def _load_schemas(self) -> None:
+    async def _load_schemas(self) -> None:
         if not self._selected_database_name:
             self._schemas = []
             return
@@ -289,10 +355,10 @@ class DatabaseBrowserApp(App):
             self._base_connection_parameters,
             self._selected_database_name,
         )
-        self._schemas = list_schemas(selected_parameters)
+        self._schemas = await list_schemas(selected_parameters)
         self._tables = []
 
-    def _load_tables(self) -> None:
+    async def _load_tables(self) -> None:
         if not self._selected_database_name or not self._selected_schema_name:
             self._tables = []
             return
@@ -300,9 +366,9 @@ class DatabaseBrowserApp(App):
             self._base_connection_parameters,
             self._selected_database_name,
         )
-        self._tables = list_tables(selected_parameters, self._selected_schema_name)
+        self._tables = await list_tables(selected_parameters, self._selected_schema_name)
 
-    def _load_rows(self) -> None:
+    async def _load_rows(self) -> None:
         if (
             not self._selected_database_name
             or not self._selected_schema_name
@@ -320,7 +386,7 @@ class DatabaseBrowserApp(App):
             self._base_connection_parameters,
             self._selected_database_name,
         )
-        self._rows_page = list_rows(
+        self._rows_page = await list_rows(
             selected_parameters,
             self._selected_schema_name,
             self._selected_table_name,
@@ -353,22 +419,22 @@ class DatabaseBrowserApp(App):
         else:
             self._resource_list_view().focus()
 
-    def _apply_filter(self, filter_text: str) -> None:
+    async def _apply_filter(self, filter_text: str) -> None:
         self._resource_filters[self._current_view] = filter_text
-        self._refresh_view()
+        await self._refresh_view()
 
-    def _run_command(self, command_text: str) -> None:
+    async def _run_command(self, command_text: str) -> None:
         if command_text in {"q", "quit", "exit"}:
             self.exit()
             return
         if not command_text:
             self._update_message("")
             return
-        if self._handle_focus_command(command_text):
+        if await self._handle_focus_command(command_text):
             return
         self._update_message(f"Unknown command: {command_text}")
 
-    def _handle_focus_command(self, command_text: str) -> bool:
+    async def _handle_focus_command(self, command_text: str) -> bool:
         normalized = command_text.strip().lower()
         focus_map = {
             "db": "database",
@@ -387,11 +453,11 @@ class DatabaseBrowserApp(App):
         if target_view == "rows" and not self._selected_table_name:
             self._update_message("Select a table first.")
             return True
-        self._set_view(target_view)
+        await self._set_view(target_view)
         self._update_message(f"Focused {normalized}")
         return True
 
-    def _refresh_view(self) -> None:
+    async def _refresh_view(self) -> None:
         resource_list = self._resource_list_view()
         resource_list.clear()
         if self._current_view == "database":
@@ -408,7 +474,7 @@ class DatabaseBrowserApp(App):
             if not self._selected_database_name:
                 self._update_message("Select a database first.")
                 return
-            self._load_schemas()
+            await self._load_schemas()
             filtered = self._filter_items(
                 self._schemas,
                 self._resource_filters["schema"],
@@ -424,7 +490,7 @@ class DatabaseBrowserApp(App):
             if not self._selected_schema_name:
                 self._update_message("Select a schema first.")
                 return
-            self._load_tables()
+            await self._load_tables()
             filtered = self._filter_items(
                 self._tables,
                 self._resource_filters["table"],
@@ -440,18 +506,18 @@ class DatabaseBrowserApp(App):
             if not self._selected_table_name:
                 self._update_message("Select a table first.")
                 return
-            self._load_rows()
+            await self._load_rows()
             self._populate_rows_table(self._rows_page)
 
-    def _set_view(self, target_view: str) -> None:
+    async def _set_view(self, target_view: str) -> None:
         if target_view == self._current_view:
             return
         self._view_history.append(self._current_view)
         self._current_view = target_view
         self._update_status()
-        self._refresh_view()
+        await self._refresh_view()
 
-    def _pop_view_history(self) -> None:
+    async def _pop_view_history(self) -> None:
         if not self._view_history:
             return
         previous_view = self._view_history.pop()
@@ -459,7 +525,7 @@ class DatabaseBrowserApp(App):
             return
         self._current_view = previous_view
         self._update_status()
-        self._refresh_view()
+        await self._refresh_view()
 
     def _show_resource_list(self) -> None:
         resource_list = self._resource_list_view()
@@ -480,9 +546,21 @@ class DatabaseBrowserApp(App):
         rows_table.clear(columns=True)
         if not row_page.columns:
             return
-        rows_table.add_columns(*row_page.columns)
-        for row in row_page.rows:
-            rows_table.add_row(*(self._format_cell_value(value) for value in row))
+        formatted_rows = [
+            [self._format_cell_value_for_table(value) for value in row]
+            for row in row_page.rows
+        ]
+        column_widths: list[int] = []
+        for column_index, column_name in enumerate(row_page.columns):
+            max_cell_width = len(column_name)
+            for formatted_row in formatted_rows:
+                if column_index < len(formatted_row):
+                    max_cell_width = max(max_cell_width, len(formatted_row[column_index]))
+            column_widths.append(min(max_cell_width, self._max_table_cell_width))
+        for column_name, width in zip(row_page.columns, column_widths, strict=False):
+            rows_table.add_column(column_name, width=width or 1)
+        for formatted_row in formatted_rows:
+            rows_table.add_row(*formatted_row)
         self._update_status()
 
     def _filter_items(
@@ -498,3 +576,62 @@ class DatabaseBrowserApp(App):
         if isinstance(value, (dict, list)):
             return json.dumps(value, ensure_ascii=True)
         return "" if value is None else str(value)
+
+    def _format_cell_value_for_table(self, value: object) -> str:
+        text = self._format_cell_value(value)
+        if len(text) <= self._max_table_cell_width:
+            return text
+        return text[: self._max_table_cell_width - 3] + "..."
+
+    def _format_cell_value_full(self, value: object) -> str:
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=True, indent=2)
+        return "" if value is None else str(value)
+
+    def copy_text_to_clipboard(self, text: str) -> None:
+        self.copy_to_clipboard(text)
+        if sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=text, text=True, check=True)
+
+    def _show_cell_detail(self) -> None:
+        if not self._rows_page.rows:
+            self._update_message("No cell to view.")
+            return
+        rows_table = self._rows_table_view()
+        coordinate = rows_table.cursor_coordinate
+        if coordinate.row >= len(self._rows_page.rows):
+            self._update_message("No cell to view.")
+            return
+        row = self._rows_page.rows[coordinate.row]
+        if coordinate.column >= len(row):
+            self._update_message("No cell to view.")
+            return
+        cell_value = row[coordinate.column]
+        self.push_screen(CellDetailScreen(self._format_cell_value_full(cell_value)))
+
+
+class CellDetailScreen(ModalScreen[None]):
+    BINDINGS = [
+        ("q", "dismiss", "Close"),
+        ("escape", "dismiss", "Close"),
+        ("y", "yank", "Yank Cell"),
+    ]
+
+    def __init__(self, cell_text: str) -> None:
+        super().__init__()
+        self._cell_text = cell_text
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._cell_text)
+
+    def action_yank(self) -> None:
+        if isinstance(self.app, DatabaseBrowserApp):
+            self.app.copy_text_to_clipboard(self._cell_text)
+
+    def _can_turn_page(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_page_turn_at < self._page_turn_cooldown_seconds:
+            return False
+        self._last_page_turn_at = now
+        return True
