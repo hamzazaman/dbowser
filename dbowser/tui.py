@@ -84,6 +84,8 @@ class DatabaseBrowserApp(App):
 
     #command-input {
         height: 1;
+        border: none;
+        padding: 0 1;
     }
 
     #resource-list {
@@ -105,6 +107,7 @@ class DatabaseBrowserApp(App):
         ("n", "next_page", "Next Page"),
         ("p", "previous_page", "Prev Page"),
         ("G", "cursor_bottom", "Bottom"),
+        ("ctrl+p", "enter_command_mode", "Command"),
         ("/", "enter_filter_mode", "Filter"),
         (":", "enter_command_mode", "Command"),
         ("escape", "escape", "Back"),
@@ -293,10 +296,21 @@ class DatabaseBrowserApp(App):
             return
         await self._pop_view_history()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "command-input":
+            return
+        prefix = "/" if self._input_mode == "filter" else ":"
+        if not self._input_mode:
+            return
+        if not event.value.startswith(prefix):
+            event.input.value = prefix + self._strip_prompt_prefix(event.value)
+            if hasattr(event.input, "cursor_position"):
+                event.input.cursor_position = len(event.input.value)
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "command-input":
             return
-        submitted_value = event.value.strip()
+        submitted_value = self._strip_prompt_prefix(event.value.strip())
         if self._input_mode == "filter":
             await self._apply_filter(submitted_value)
         elif self._input_mode == "command":
@@ -415,6 +429,7 @@ class DatabaseBrowserApp(App):
         self._selected_table_name = resource_list.highlighted_child.table_name
         self._rows_page_offset = 0
         self._update_status()
+        self._show_rows_loading_state()
         await self._load_rows()
         await self._set_view("rows")
 
@@ -480,9 +495,13 @@ class DatabaseBrowserApp(App):
             "Filter" if mode == "filter" else "Command (q to quit)"
         )
         if mode == "filter":
-            command_input.value = self._resource_filters.get(self._current_view, "")
+            command_input.value = (
+                "/" + self._resource_filters.get(self._current_view, "")
+            )
         else:
-            command_input.value = ""
+            command_input.value = ":"
+        if hasattr(command_input, "cursor_position"):
+            command_input.cursor_position = len(command_input.value)
         command_input.display = True
         command_input.focus()
         self._update_message("FILTER:" if mode == "filter" else "COMMAND:")
@@ -654,6 +673,18 @@ class DatabaseBrowserApp(App):
             rows_table.add_row(*formatted_row)
         self._update_status()
 
+    def _show_rows_loading_state(self) -> None:
+        columns = self._rows_page.columns or ["Loading"]
+        placeholder_row = ["Loading..."] + [""] * (len(columns) - 1)
+        self._rows_page = RowPage(
+            columns=columns,
+            rows=[tuple(placeholder_row)],
+            limit=self._rows_page_limit,
+            offset=self._rows_page_offset,
+            has_more=False,
+        )
+        self._populate_rows_table(self._rows_page)
+
     def _filter_items(
         self,
         items: Sequence[NamedItemT],
@@ -662,6 +693,11 @@ class DatabaseBrowserApp(App):
         if not filter_text:
             return list(items)
         return [item for item in items if filter_text.lower() in item.name.lower()]
+
+    def _strip_prompt_prefix(self, value: str) -> str:
+        if value.startswith(("/", ":")):
+            return value[1:].lstrip()
+        return value
 
     async def _clear_active_filter(self) -> bool:
         if self._current_view == "rows":
@@ -677,7 +713,10 @@ class DatabaseBrowserApp(App):
 
     def _footer_text(self) -> str:
         bindings = self._footer_bindings()
-        return "  ".join([f"{key}: {label}" for key, label in bindings])
+        return "  ".join([self._format_binding(key, label) for key, label in bindings])
+
+    def _format_binding(self, key: str, label: str) -> str:
+        return f"[bold cyan]{key}[/] {label}"
 
     def _footer_bindings(self) -> list[tuple[str, str]]:
         if self._input_mode == "command":
@@ -685,7 +724,7 @@ class DatabaseBrowserApp(App):
         if self._input_mode == "filter":
             return [("enter", "Apply"), ("esc", "Cancel")]
 
-        base = [("q", "Quit"), (":", "Command"), ("esc", "Back")]
+        base = [("q", "Quit"), ("^p", "Command"), (":", "Command"), ("esc", "Back")]
         movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
 
         if self._current_view == "rows":
@@ -761,4 +800,5 @@ class CellDetailScreen(ModalScreen[None]):
 
 
 class KeyBindingBar(Static):
-    pass
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__("", markup=True, **kwargs)
