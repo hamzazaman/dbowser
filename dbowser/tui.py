@@ -843,7 +843,7 @@ class DatabaseBrowserApp(App):
 
     async def _refresh_view(self) -> None:
         resource_list = self._resource_list_view()
-        resource_list.clear()
+        await resource_list.clear()
         if self._current_view == "connection":
             self._show_resource_list()
             self._update_keybinds()
@@ -851,8 +851,11 @@ class DatabaseBrowserApp(App):
                 self._connections,
                 self._resource_filters["connection"],
             )
-            for connection in filtered:
-                resource_list.append(ConnectionListItem(connection.name))
+            items = [ConnectionListItem(connection.name) for connection in filtered]
+            if items:
+                await resource_list.extend(items)
+                resource_list.index = 0
+                resource_list.focus()
             return
         if self._current_view == "database":
             self._show_resource_list()
@@ -861,8 +864,11 @@ class DatabaseBrowserApp(App):
                 self._databases,
                 self._resource_filters["database"],
             )
-            for database in filtered:
-                resource_list.append(DatabaseListItem(database.name))
+            items = [DatabaseListItem(database.name) for database in filtered]
+            if items:
+                await resource_list.extend(items)
+                resource_list.index = 0
+                resource_list.focus()
             return
         if self._current_view == "schema":
             self._show_resource_list()
@@ -875,8 +881,11 @@ class DatabaseBrowserApp(App):
                 self._schemas,
                 self._resource_filters["schema"],
             )
-            for schema in filtered:
-                resource_list.append(SchemaListItem(schema.name))
+            items = [SchemaListItem(schema.name) for schema in filtered]
+            if items:
+                await resource_list.extend(items)
+                resource_list.index = 0
+                resource_list.focus()
             return
         if self._current_view == "table":
             self._show_resource_list()
@@ -892,13 +901,17 @@ class DatabaseBrowserApp(App):
                 self._tables,
                 self._resource_filters["table"],
             )
-            for table in filtered:
-                resource_list.append(
-                    TableListItem(
-                        table.name,
-                        table.estimated_rows,
-                    )
+            items = [
+                TableListItem(
+                    table.name,
+                    table.estimated_rows,
                 )
+                for table in filtered
+            ]
+            if items:
+                await resource_list.extend(items)
+                resource_list.index = 0
+                resource_list.focus()
             return
         if self._current_view == "rows":
             self._show_rows_table()
@@ -968,6 +981,8 @@ class DatabaseBrowserApp(App):
             rows_table.add_column(column_name, width=width or 1)
         for formatted_row in formatted_rows:
             rows_table.add_row(*formatted_row)
+        if rows_table.row_count:
+            rows_table.move_cursor(row=0, column=0, animate=False)
         self._update_status()
 
     def _show_rows_loading_state(self) -> None:
