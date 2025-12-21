@@ -263,6 +263,7 @@ class DatabaseBrowserApp(App):
         self._current_message = ""
         self._selection_mode = ""
         self._selection_anchor = Coordinate(0, 0)
+        self._selection_last_bounds: tuple[int, int, int, int] | None = None
         self._rows_column_widths: list[int] = []
         self._rows_page = RowPage(
             columns=[],
@@ -371,7 +372,8 @@ class DatabaseBrowserApp(App):
             return
         if self._current_view == "rows":
             self._rows_table_view().action_cursor_down()
-            self._refresh_rows_selection()
+            if self._selection_mode:
+                self._refresh_rows_selection()
             return
         self._resource_list_view().action_cursor_down()
 
@@ -380,7 +382,8 @@ class DatabaseBrowserApp(App):
             return
         if self._current_view == "rows":
             self._rows_table_view().action_cursor_up()
-            self._refresh_rows_selection()
+            if self._selection_mode:
+                self._refresh_rows_selection()
             return
         self._resource_list_view().action_cursor_up()
 
@@ -388,20 +391,23 @@ class DatabaseBrowserApp(App):
         if self._input_mode or self._current_view != "rows":
             return
         self._rows_table_view().action_cursor_left()
-        self._refresh_rows_selection()
+        if self._selection_mode:
+            self._refresh_rows_selection()
 
     def action_cursor_right(self) -> None:
         if self._input_mode or self._current_view != "rows":
             return
         self._rows_table_view().action_cursor_right()
-        self._refresh_rows_selection()
+        if self._selection_mode:
+            self._refresh_rows_selection()
 
     def action_scroll_down(self) -> None:
         if self._input_mode:
             return
         if self._current_view == "rows":
             self._page_cursor_rows(direction=1)
-            self._refresh_rows_selection()
+            if self._selection_mode:
+                self._refresh_rows_selection()
             return
         self._page_cursor_list(direction=1)
 
@@ -410,7 +416,8 @@ class DatabaseBrowserApp(App):
             return
         if self._current_view == "rows":
             self._page_cursor_rows(direction=-1)
-            self._refresh_rows_selection()
+            if self._selection_mode:
+                self._refresh_rows_selection()
             return
         self._page_cursor_list(direction=-1)
 
@@ -425,7 +432,8 @@ class DatabaseBrowserApp(App):
                 row=rows_table.row_count - 1,
                 column=rows_table.cursor_column,
             )
-            self._refresh_rows_selection()
+            if self._selection_mode:
+                self._refresh_rows_selection()
             return
         resource_list = self._resource_list_view()
         item_count = len(resource_list.children)
@@ -582,7 +590,8 @@ class DatabaseBrowserApp(App):
             column=event.coordinate.column,
             animate=False,
         )
-        self._refresh_rows_selection()
+        if self._selection_mode:
+            self._refresh_rows_selection()
 
     def action_toggle_block_selection(self) -> None:
         if self._input_mode or self._current_view != "rows":
@@ -592,6 +601,7 @@ class DatabaseBrowserApp(App):
             return
         self._selection_mode = "block"
         self._selection_anchor = self._rows_table_view().cursor_coordinate
+        self._selection_last_bounds = None
         self._refresh_rows_selection()
         self._update_message("Block selection.")
 
@@ -603,6 +613,7 @@ class DatabaseBrowserApp(App):
             return
         self._selection_mode = "row"
         self._selection_anchor = self._rows_table_view().cursor_coordinate
+        self._selection_last_bounds = None
         self._refresh_rows_selection()
         self._update_message("Row selection.")
 
@@ -712,7 +723,8 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             rows_table = self._rows_table_view()
             rows_table.move_cursor(row=0, column=rows_table.cursor_column)
-            self._refresh_rows_selection()
+            if self._selection_mode:
+                self._refresh_rows_selection()
             return
         resource_list = self._resource_list_view()
         if len(resource_list.children) == 0:
@@ -1178,6 +1190,7 @@ class DatabaseBrowserApp(App):
             rows_table.add_row(*styled_row)
         if rows_table.row_count:
             rows_table.move_cursor(row=0, column=0, animate=False)
+        self._selection_last_bounds = None
         self._update_status()
 
     def _show_rows_loading_state(self) -> None:
@@ -1195,11 +1208,13 @@ class DatabaseBrowserApp(App):
     def _selection_active(self) -> bool:
         return self._selection_mode in {"block", "row"}
 
-    def _selection_bounds(self) -> tuple[int, int, int, int]:
+    def _selection_bounds(self) -> tuple[int, int, int, int] | None:
+        if not self._selection_mode:
+            return None
         row_count = len(self._rows_page.rows)
         column_count = len(self._rows_page.columns)
         if row_count == 0 or column_count == 0:
-            return 0, -1, 0, -1
+            return None
         anchor = self._selection_anchor
         cursor = self._rows_table_view().cursor_coordinate
         row_start = max(0, min(anchor.row, cursor.row))
@@ -1213,7 +1228,10 @@ class DatabaseBrowserApp(App):
     def _cell_selected(self, row_index: int, column_index: int) -> bool:
         if not self._selection_active():
             return False
-        row_start, row_end, column_start, column_end = self._selection_bounds()
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return False
+        row_start, row_end, column_start, column_end = bounds
         return (
             row_start <= row_index <= row_end
             and column_start <= column_index <= column_end
@@ -1243,9 +1261,25 @@ class DatabaseBrowserApp(App):
         rows_table = self._rows_table_view()
         if rows_table.row_count == 0:
             return
-        for row_index, row in enumerate(self._rows_page.rows):
-            for column_index, cell_value in enumerate(row):
-                cell_text = self._format_cell_value_for_table(cell_value)
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return
+        if self._selection_last_bounds is not None:
+            self._update_selection_bounds(self._selection_last_bounds)
+        self._update_selection_bounds(bounds)
+        self._selection_last_bounds = bounds
+
+    def _update_selection_bounds(self, bounds: tuple[int, int, int, int]) -> None:
+        row_start, row_end, column_start, column_end = bounds
+        rows_table = self._rows_table_view()
+        for row_index in range(row_start, row_end + 1):
+            if row_index >= len(self._rows_page.rows):
+                continue
+            row = self._rows_page.rows[row_index]
+            for column_index in range(column_start, column_end + 1):
+                if column_index >= len(row):
+                    continue
+                cell_text = self._format_cell_value_for_table(row[column_index])
                 rows_table.update_cell_at(
                     Coordinate(row_index, column_index),
                     self._render_table_cell(cell_text, row_index, column_index),
@@ -1254,9 +1288,12 @@ class DatabaseBrowserApp(App):
     def _clear_selection(self) -> bool:
         if not self._selection_mode:
             return False
+        previous_bounds = self._selection_last_bounds
         self._selection_mode = ""
         self._selection_anchor = Coordinate(0, 0)
-        self._refresh_rows_selection()
+        self._selection_last_bounds = None
+        if previous_bounds is not None:
+            self._update_selection_bounds(previous_bounds)
         self._update_message("")
         return True
 
@@ -1264,7 +1301,11 @@ class DatabaseBrowserApp(App):
         if not self._selection_mode:
             self._update_message("No selection to yank.")
             return
-        row_start, row_end, column_start, column_end = self._selection_bounds()
+        bounds = self._selection_bounds()
+        if bounds is None:
+            self._update_message("No selection to yank.")
+            return
+        row_start, row_end, column_start, column_end = bounds
         if row_end < row_start or column_end < column_start:
             self._update_message("No selection to yank.")
             return
