@@ -1,5 +1,7 @@
 import json
 from contextlib import asynccontextmanager
+import os
+import shlex
 import time
 import subprocess
 import sys
@@ -24,9 +26,11 @@ from dbowser.config import (
     add_connection,
     AppConfig,
     ConnectionConfig,
+    load_last_query,
+    query_path,
     save_config,
+    save_last_query,
 )
-from dbowser.query_vim import QueryVim
 from dbowser.ui_screens import AddConnectionDialog, CellDetailScreen, ErrorDialog, KeyBindingBar
 
 from dbowser.postgres_driver import (
@@ -146,11 +150,12 @@ class DatabaseBrowserApp(App):
         height: 1;
     }
 
-    #query-editor {
-        height: 8;
+    #query-text {
+        height: 6;
         border: tall rgb(42, 68, 92);
         background: rgb(22, 26, 30);
         color: rgb(220, 230, 235);
+        padding: 0 1;
     }
 
     #input-prefix {
@@ -229,8 +234,8 @@ class DatabaseBrowserApp(App):
         ("ctrl+p", "enter_palette_mode", "Palette"),
         ("ctrl+d", "scroll_down", "Scroll Down"),
         ("ctrl+u", "scroll_up", "Scroll Up"),
-        ("ctrl+enter", "run_query", "Run Query"),
-        ("i", "focus_query_editor", "Edit Query"),
+        ("r", "run_query", "Run Query"),
+        ("e", "edit_query", "Edit Query"),
         ("a", "add_connection", "Add Connection"),
         ("w", "enter_where_mode", "Where"),
         ("o", "enter_order_mode", "Order"),
@@ -287,7 +292,7 @@ class DatabaseBrowserApp(App):
         )
         self._rows_where_clause = ""
         self._rows_order_by_clause = ""
-        self._query_text = ""
+        self._query_text = load_last_query()
         self._query_page_offset = 0
         self._query_page = RowPage(
             columns=[],
@@ -322,7 +327,7 @@ class DatabaseBrowserApp(App):
                 yield Static("", id="view-bar-left")
                 yield Static("", id="view-bar-text")
                 yield Static("", id="loading-indicator")
-            yield QueryVim(id="query-editor")
+            yield Static("", id="query-text")
             yield Static(self._where_text(), id="where-bar")
             yield Static(self._order_text(), id="order-bar")
             yield ListView(id="resource-list")
@@ -340,8 +345,8 @@ class DatabaseBrowserApp(App):
         input_bar.display = False
         message_line = self.query_one("#message-line", Static)
         message_line.display = True
-        query_editor = self.query_one("#query-editor", QueryVim)
-        query_editor.display = False
+        query_text = self.query_one("#query-text", Static)
+        query_text.display = False
         self._update_keybinds()
         if self._connections and self._initial_connection_name:
             await self._apply_initial_selection()
@@ -392,10 +397,14 @@ class DatabaseBrowserApp(App):
             return
         self._enter_input_mode("order")
 
-    def action_focus_query_editor(self) -> None:
+    async def action_edit_query(self) -> None:
         if self._input_mode or self._current_view != "query":
             return
-        self._query_editor().focus_editor()
+        await self._open_query_in_editor()
+        self._query_text = load_last_query()
+        self._query_page_offset = 0
+        self._query_text_view().update(self._query_text)
+        self._update_status()
 
     async def action_run_query(self) -> None:
         if self._input_mode or self._current_view != "query":
@@ -403,13 +412,14 @@ class DatabaseBrowserApp(App):
         if not self._selected_database_name:
             self._update_message("Select a database first.")
             return
-        query_editor = self._query_editor()
-        self._query_text = await query_editor.get_text()
+        self._query_text = load_last_query()
+        save_last_query(self._query_text)
         self._query_page_offset = 0
         self._clear_selection()
         if not self._query_text.strip():
             self._update_message("Query is empty.")
             return
+        self._query_text_view().update(self._query_text)
         self._show_query_loading_state()
         await self._load_query_results()
         self._populate_rows_table(self._query_page)
@@ -643,10 +653,7 @@ class DatabaseBrowserApp(App):
             return
         await self.action_select_resource()
 
-    async def on_query_vim_run_requested(self, event: QueryVim.RunRequested) -> None:
-        if self._current_view != "query":
-            return
-        await self.action_run_query()
+
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         if event.data_table.id != "rows-table":
@@ -789,8 +796,8 @@ class DatabaseBrowserApp(App):
     def _resource_list_view(self) -> ListView:
         return self.query_one("#resource-list", ListView)
 
-    def _query_editor(self) -> QueryVim:
-        return self.query_one("#query-editor", QueryVim)
+    def _query_text_view(self) -> Static:
+        return self.query_one("#query-text", Static)
 
     def _rows_table_view(self) -> DataTable:
         return self.query_one("#rows-table", DataTable)
@@ -1054,7 +1061,7 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             self._rows_table_view().focus()
         elif self._current_view == "query":
-            self._query_editor().focus()
+            self._rows_table_view().focus()
         else:
             self._resource_list_view().focus()
         if not keep_message:
@@ -1271,6 +1278,9 @@ class DatabaseBrowserApp(App):
             if not self._selected_database_name:
                 self._update_message("Select a database first.")
                 return
+            self._query_text = load_last_query()
+            query_text = self._query_text_view()
+            query_text.update(self._query_text)
             self._populate_rows_table(self._query_page)
             return
 
@@ -1297,29 +1307,29 @@ class DatabaseBrowserApp(App):
     def _show_resource_list(self) -> None:
         resource_list = self._resource_list_view()
         rows_table = self._rows_table_view()
-        query_editor = self._query_editor()
+        query_text = self._query_text_view()
         resource_list.display = True
         rows_table.display = False
-        query_editor.display = False
+        query_text.display = False
         resource_list.focus()
 
     def _show_rows_table(self) -> None:
         resource_list = self._resource_list_view()
         rows_table = self._rows_table_view()
-        query_editor = self._query_editor()
+        query_text = self._query_text_view()
         resource_list.display = False
         rows_table.display = True
-        query_editor.display = False
+        query_text.display = False
         rows_table.focus()
 
     def _show_query_view(self) -> None:
         resource_list = self._resource_list_view()
         rows_table = self._rows_table_view()
-        query_editor = self._query_editor()
+        query_text = self._query_text_view()
         resource_list.display = False
         rows_table.display = True
-        query_editor.display = True
-        query_editor.focus_editor()
+        query_text.display = True
+        rows_table.focus()
 
     def _populate_rows_table(self, row_page: RowPage) -> None:
         rows_table = self._rows_table_view()
@@ -1382,7 +1392,7 @@ class DatabaseBrowserApp(App):
         self._populate_rows_table(self._query_page)
 
     def _reset_query_state(self) -> None:
-        self._query_text = ""
+        self._query_text = load_last_query()
         self._query_page_offset = 0
         self._query_page = RowPage(
             columns=[],
@@ -1391,6 +1401,24 @@ class DatabaseBrowserApp(App):
             offset=self._query_page_offset,
             has_more=False,
         )
+
+    async def _open_query_in_editor(self) -> None:
+        query_file = query_path()
+        save_last_query(self._query_text)
+        editor_env = os.environ.get("EDITOR", "").strip()
+        candidates = [editor_env] if editor_env else []
+        candidates.extend(["vim", "nano"])
+        for candidate in candidates:
+            if not candidate:
+                continue
+            command = [*shlex.split(candidate), str(query_file)]
+            try:
+                with self.app.suspend():
+                    subprocess.run(command, check=False)
+                return
+            except FileNotFoundError:
+                continue
+        self._update_message("No editor found. Set $EDITOR or install vim/nano.")
 
     def _selection_active(self) -> bool:
         return self._selection_mode in {"block", "row"}
@@ -1663,10 +1691,10 @@ class DatabaseBrowserApp(App):
             return (
                 base
                 + [
+                    ("e", "Edit Query"),
+                    ("r", "Run"),
                     ("h/j/k/l", "Move"),
                     ("n/p", "Page"),
-                    ("i", "Edit Query"),
-                    ("ctrl+enter", "Run"),
                     ("v", "Block Select"),
                     ("V", "Row Select"),
                     (":pagesize N", "Rows/Page"),

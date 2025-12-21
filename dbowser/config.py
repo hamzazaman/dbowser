@@ -22,6 +22,10 @@ def _config_path() -> Path:
     return _config_dir() / "connections.json"
 
 
+def _query_path() -> Path:
+    return _config_dir() / "query.sql"
+
+
 def load_config() -> AppConfig:
     config_path = _config_path()
     if not config_path.exists():
@@ -51,3 +55,20 @@ def add_connection(config: AppConfig, connection: ConnectionConfig) -> AppConfig
         raise ValueError(f"Connection name already exists: {connection.name}")
     updated_connections = [*config.connections, connection]
     return AppConfig(connections=updated_connections)
+
+
+def load_last_query() -> str:
+    query_path = _query_path()
+    if not query_path.exists():
+        return "SELECT 1;"
+    return query_path.read_text(encoding="utf-8").strip() or "SELECT 1;"
+
+
+def save_last_query(query_text: str) -> None:
+    config_dir = _config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _query_path().write_text(query_text.strip() or "SELECT 1;", encoding="utf-8")
+
+
+def query_path() -> Path:
+    return _query_path()
