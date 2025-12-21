@@ -31,7 +31,12 @@ from dbowser.config import (
     save_config,
     save_last_query,
 )
-from dbowser.ui_screens import AddConnectionDialog, CellDetailScreen, ErrorDialog, KeyBindingBar
+from dbowser.ui_screens import (
+    AddConnectionDialog,
+    CellDetailScreen,
+    ErrorDialog,
+    KeyBindingBar,
+)
 
 from dbowser.postgres_driver import (
     ConnectionParameters,
@@ -47,8 +52,6 @@ from dbowser.postgres_driver import (
     parse_connection_parameters,
     run_query,
 )
-
-
 
 
 class DatabaseListItem(ListItem):
@@ -89,10 +92,24 @@ class DatabaseBrowserApp(App):
     DEFAULT_CSS = """
     #top-bar {
         height: 1;
+        background: rgb(12, 40, 62);
+        color: rgb(225, 240, 255);
+        content-align: left middle;
+        padding: 0 1;
+        text-style: bold;
     }
 
     #selected-status {
         width: 1fr;
+        color: rgb(235, 245, 255);
+        text-style: bold;
+    }
+
+    #status-right {
+        width: auto;
+        content-align: right middle;
+        color: rgb(235, 245, 255);
+        text-style: bold;
     }
 
     #loading-indicator {
@@ -312,10 +329,10 @@ class DatabaseBrowserApp(App):
         }
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with Vertical():
             with Horizontal(id="top-bar"):
                 yield Static(self._status_text(), id="selected-status")
+                yield Static("", id="status-right")
             keybinds = KeyBindingBar()
             keybinds.id = "keybinds-bar"
             yield keybinds
@@ -551,13 +568,17 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             if self._rows_page_offset == 0:
                 return
-            self._rows_page_offset = max(0, self._rows_page_offset - self._rows_page_limit)
+            self._rows_page_offset = max(
+                0, self._rows_page_offset - self._rows_page_limit
+            )
             await self._load_rows()
             self._populate_rows_table(self._rows_page)
         else:
             if self._query_page_offset == 0:
                 return
-            self._query_page_offset = max(0, self._query_page_offset - self._rows_page_limit)
+            self._query_page_offset = max(
+                0, self._query_page_offset - self._rows_page_limit
+            )
             await self._load_query_results()
             self._populate_rows_table(self._query_page)
 
@@ -653,8 +674,6 @@ class DatabaseBrowserApp(App):
             return
         await self.action_select_resource()
 
-
-
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         if event.data_table.id != "rows-table":
             return
@@ -712,15 +731,16 @@ class DatabaseBrowserApp(App):
         self._last_g_pressed_at = now
 
     def _status_text(self) -> str:
+        return "[bold rgb(255, 200, 90)]DBowser[/]"
+
+    def _status_right_text(self) -> str:
         connection_text = self._selected_connection_name or "<none>"
         database_text = self._selected_database_name or "<none>"
         schema_text = self._selected_schema_name or "<none>"
-        row_page_text = ""
-        if self._current_view == "rows":
-            row_page_text = f" | {self._rows_page_limit}/page"
         return (
-            f"Connection: {connection_text} | db: {database_text} | schema: {schema_text}"
-            f"{row_page_text}"
+            f"[bold rgb(120, 200, 255)]Conn[/]: {connection_text}  "
+            f"[bold rgb(160, 255, 180)]DB[/]: {database_text}  "
+            f"[bold rgb(255, 190, 230)]Schema[/]: {schema_text}"
         )
 
     def _view_bar_text(self) -> str:
@@ -739,11 +759,17 @@ class DatabaseBrowserApp(App):
         if self._current_view == "rows":
             table_text = self._selected_table_name or "<none>"
             page_number = (self._rows_page_offset // self._rows_page_limit) + 1
-            return f"Table Row Data ({table_text}) Page {page_number}"
+            return (
+                f"Table Row Data ({table_text}) Page {page_number}"
+                f" | {self._rows_page_limit}/page"
+            )
         if self._current_view == "query":
             database_text = self._selected_database_name or "<none>"
             page_number = (self._query_page_offset // self._rows_page_limit) + 1
-            return f"Query Results ({database_text}) Page {page_number}"
+            return (
+                f"Query Results ({database_text}) Page {page_number}"
+                f" | {self._rows_page_limit}/page"
+            )
         return ""
 
     def _where_text(self) -> str:
@@ -759,6 +785,8 @@ class DatabaseBrowserApp(App):
     def _update_status(self) -> None:
         status = self.query_one("#selected-status", Static)
         status.update(self._status_text())
+        status_right = self.query_one("#status-right", Static)
+        status_right.update(self._status_right_text())
         view_bar = self.query_one("#view-bar-text", Static)
         view_bar.update(self._view_bar_text())
 
