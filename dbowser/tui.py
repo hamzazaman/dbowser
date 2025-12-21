@@ -7,9 +7,8 @@ from typing import AsyncIterator, Protocol, Sequence, TypeVar
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.coordinate import Coordinate
-from textual.screen import ModalScreen
 from textual.events import Key
 from textual.widgets import (
     DataTable,
@@ -27,6 +26,7 @@ from dbowser.config import (
     ConnectionConfig,
     save_config,
 )
+from dbowser.ui_screens import AddConnectionDialog, CellDetailScreen, ErrorDialog, KeyBindingBar
 
 from dbowser.postgres_driver import (
     ConnectionParameters,
@@ -1479,7 +1479,15 @@ class DatabaseBrowserApp(App):
             self._update_message("No cell to view.")
             return
         cell_value = row[coordinate.column]
-        self.push_screen(CellDetailScreen(self._format_cell_value_full(cell_value)))
+        table_text = self._selected_table_name or "<none>"
+        view_text = f"Cell Detail ({table_text})"
+        self.push_screen(
+            CellDetailScreen(
+                self._format_cell_value_full(cell_value),
+                self._status_text(),
+                view_text,
+            )
+        )
 
     def _show_error_dialog(self, title: str, error: Exception) -> None:
         if self._input_mode:
@@ -1488,118 +1496,3 @@ class DatabaseBrowserApp(App):
             return
         self._error_dialog_open = True
         self.push_screen(ErrorDialog(title, str(error)))
-
-
-class CellDetailScreen(ModalScreen[None]):
-    BINDINGS = [
-        ("escape", "dismiss", "Close"),
-        ("y", "yank", "Yank Cell"),
-    ]
-
-    def __init__(self, cell_text: str) -> None:
-        super().__init__()
-        self._cell_text = cell_text
-
-    def compose(self) -> ComposeResult:
-        status_text = ""
-        view_text = "Cell Detail"
-        if isinstance(self.app, DatabaseBrowserApp):
-            status_text = self.app._status_text()
-            table_text = self.app._selected_table_name or "<none>"
-            view_text = f"Cell Detail ({table_text})"
-        yield Header()
-        with Vertical():
-            with Horizontal(id="top-bar"):
-                yield Static(status_text, id="selected-status")
-            keybinds = KeyBindingBar()
-            keybinds.id = "keybinds-bar"
-            keybinds.update("[bold cyan]y[/] Yank  [bold cyan]esc[/] Back")
-            yield keybinds
-            with Horizontal(id="view-bar"):
-                yield Static("", id="view-bar-left")
-                yield Static(view_text, id="view-bar-text")
-                yield Static("", id="loading-indicator")
-            with VerticalScroll():
-                yield Static(self._cell_text, id="cell-detail-text")
-
-    def action_yank(self) -> None:
-        if isinstance(self.app, DatabaseBrowserApp):
-            self.app.copy_text_to_clipboard(self._cell_text)
-
-
-class KeyBindingBar(Static):
-    def __init__(self) -> None:
-        super().__init__("", markup=True)
-
-
-class AddConnectionDialog(ModalScreen[ConnectionConfig | None]):
-    BINDINGS = [
-        ("q", "dismiss", "Close"),
-        ("escape", "dismiss", "Close"),
-    ]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="add-connection-dialog"):
-            yield Static("Add Connection", id="add-connection-title")
-            yield Static("Name", id="add-connection-name-label")
-            yield Input(placeholder="prod", id="add-connection-name")
-            yield Static("URL", id="add-connection-url-label")
-            yield Input(
-                placeholder="postgresql://user:pass@host:5432/postgres",
-                id="add-connection-url",
-            )
-            yield Static("", id="add-connection-error")
-
-    def on_mount(self) -> None:
-        self.focus()
-        self.query_one("#add-connection-name", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "add-connection-name":
-            self.query_one("#add-connection-url", Input).focus()
-            return
-        if event.input.id != "add-connection-url":
-            return
-        name = self.query_one("#add-connection-name", Input).value.strip()
-        url = self.query_one("#add-connection-url", Input).value.strip()
-        if not name or not url:
-            self.query_one("#add-connection-error", Static).update(
-                "Name and URL are required."
-            )
-            return
-        self.dismiss(ConnectionConfig(name=name, url=url))
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#add-connection-url", Input).focus()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#add-connection-name", Input).focus()
-
-
-class ErrorDialog(ModalScreen[None]):
-    BINDINGS = [
-        ("q", "dismiss", "Close"),
-        ("escape", "dismiss", "Close"),
-    ]
-
-    def __init__(self, title: str, message: str) -> None:
-        super().__init__()
-        self._title = title
-        self._message = message
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="error-dialog"):
-            yield Static(self._title, id="error-title")
-            yield Static(self._message, id="error-message")
-
-    def on_mount(self) -> None:
-        self.focus()
-
-    def on_key(self, event: Key) -> None:
-        if event.key == "escape":
-            self.dismiss()
-            event.stop()
-
-    def on_unmount(self) -> None:
-        if isinstance(self.app, DatabaseBrowserApp):
-            self.app._error_dialog_open = False
