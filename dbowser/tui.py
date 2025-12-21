@@ -681,10 +681,10 @@ class DatabaseBrowserApp(App):
         keybinds.update(self._footer_text())
         where_bar = self.query_one("#where-bar", Static)
         where_bar.update(self._where_text())
-        where_bar.display = self._current_view == "rows"
+        where_bar.display = self._current_view == "rows" and bool(self._rows_where_clause)
         order_bar = self.query_one("#order-bar", Static)
         order_bar.update(self._order_text())
-        order_bar.display = self._current_view == "rows"
+        order_bar.display = self._current_view == "rows" and bool(self._rows_order_by_clause)
 
     def _set_loading(self, is_loading: bool, message: str = "Loading...") -> None:
         loading_indicator = self.query_one("#loading-indicator", Static)
