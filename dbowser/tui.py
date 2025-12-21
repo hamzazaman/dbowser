@@ -7,7 +7,7 @@ from typing import AsyncIterator, Protocol, Sequence, TypeVar
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.events import Key
@@ -681,10 +681,14 @@ class DatabaseBrowserApp(App):
         keybinds.update(self._footer_text())
         where_bar = self.query_one("#where-bar", Static)
         where_bar.update(self._where_text())
-        where_bar.display = self._current_view == "rows" and bool(self._rows_where_clause)
+        where_bar.display = self._current_view == "rows" and bool(
+            self._rows_where_clause
+        )
         order_bar = self.query_one("#order-bar", Static)
         order_bar.update(self._order_text())
-        order_bar.display = self._current_view == "rows" and bool(self._rows_order_by_clause)
+        order_bar.display = self._current_view == "rows" and bool(
+            self._rows_order_by_clause
+        )
 
     def _set_loading(self, is_loading: bool, message: str = "Loading...") -> None:
         loading_indicator = self.query_one("#loading-indicator", Static)
@@ -1402,22 +1406,21 @@ class DatabaseBrowserApp(App):
             return [("enter", "Apply"), ("esc", "Cancel")]
 
         base = [(":", "Command"), ("esc", "Back")]
-        movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
+        movement = [("j/k", "Move")]
 
         if self._current_view == "rows":
             return (
                 base
-                + movement
                 + [
-                    ("h/l", "Left/Right"),
+                    ("h/j/k/l", "Move"),
+                    ("n/p", "Page"),
                     ("w", "Where"),
                     ("o", "Order By"),
                     ("v", "Block Select"),
                     ("V", "Row Select"),
-                    (": pagesize N", "Rows/Page"),
+                    (":pagesize N", "Rows/Page"),
                     ("enter", "View Cell"),
                     ("y", "Yank"),
-                    ("n/p", "Page"),
                 ]
                 + [("^p", "Palette"), (":q", "Quit")]
             )
@@ -1489,7 +1492,6 @@ class DatabaseBrowserApp(App):
 
 class CellDetailScreen(ModalScreen[None]):
     BINDINGS = [
-        ("q", "dismiss", "Close"),
         ("escape", "dismiss", "Close"),
         ("y", "yank", "Yank Cell"),
     ]
@@ -1499,8 +1501,26 @@ class CellDetailScreen(ModalScreen[None]):
         self._cell_text = cell_text
 
     def compose(self) -> ComposeResult:
+        status_text = ""
+        view_text = "Cell Detail"
+        if isinstance(self.app, DatabaseBrowserApp):
+            status_text = self.app._status_text()
+            table_text = self.app._selected_table_name or "<none>"
+            view_text = f"Cell Detail ({table_text})"
+        yield Header()
         with Vertical():
-            yield Static(self._cell_text)
+            with Horizontal(id="top-bar"):
+                yield Static(status_text, id="selected-status")
+            keybinds = KeyBindingBar()
+            keybinds.id = "keybinds-bar"
+            keybinds.update("[bold cyan]y[/] Yank  [bold cyan]esc[/] Back")
+            yield keybinds
+            with Horizontal(id="view-bar"):
+                yield Static("", id="view-bar-left")
+                yield Static(view_text, id="view-bar-text")
+                yield Static("", id="loading-indicator")
+            with VerticalScroll():
+                yield Static(self._cell_text, id="cell-detail-text")
 
     def action_yank(self) -> None:
         if isinstance(self.app, DatabaseBrowserApp):
