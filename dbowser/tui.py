@@ -395,7 +395,7 @@ class DatabaseBrowserApp(App):
     def action_focus_query_editor(self) -> None:
         if self._input_mode or self._current_view != "query":
             return
-        self._query_editor().focus()
+        self._query_editor().focus_editor()
 
     async def action_run_query(self) -> None:
         if self._input_mode or self._current_view != "query":
@@ -1319,7 +1319,7 @@ class DatabaseBrowserApp(App):
         resource_list.display = False
         rows_table.display = True
         query_editor.display = True
-        query_editor.focus()
+        query_editor.focus_editor()
 
     def _populate_rows_table(self, row_page: RowPage) -> None:
         rows_table = self._rows_table_view()
