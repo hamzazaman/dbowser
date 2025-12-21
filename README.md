@@ -28,3 +28,10 @@ dbowser --conn prod --db mydb --schema public
 - `:` command mode, `/` filter (not in rows view)
 - `w` edit WHERE, `o` edit ORDER BY (rows view)
 - `n/p` next/previous page (rows view)
+
+### Commands
+
+- `:connection` / `:db` / `:schema` / `:table` / `:rows` focus views
+- `:query` open query view
+- `:pagesize N` set rows per page
+- `:q` quit
