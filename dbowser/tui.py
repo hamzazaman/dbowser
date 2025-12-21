@@ -88,16 +88,40 @@ class DatabaseBrowserApp(App):
     }
 
     #loading-indicator {
-        width: auto;
+        width: 1fr;
         content-align: right middle;
+        color: rgb(255, 170, 60);
     }
 
     #keybinds-bar {
+        height: auto;
+        min-height: 1;
+        text-wrap: wrap;
+    }
+
+    #view-bar {
         height: 1;
+        background: rgb(18, 60, 90);
+        color: rgb(235, 245, 255);
+        padding: 0 1;
+        content-align: center middle;
+    }
+
+    #view-bar-left {
+        width: 1fr;
+        content-align: left middle;
+    }
+
+    #view-bar-text {
+        width: auto;
+        content-align: center middle;
     }
 
     #message-line {
-        height: 1;
+        height: auto;
+        background: rgb(28, 32, 36);
+        color: rgb(200, 210, 220);
+        padding: 0 1;
     }
 
     #where-bar {
@@ -183,7 +207,6 @@ class DatabaseBrowserApp(App):
     """
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
         ("j", "cursor_down", "Down"),
         ("k", "cursor_up", "Up"),
         ("h", "cursor_left", "Left"),
@@ -193,6 +216,8 @@ class DatabaseBrowserApp(App):
         ("p", "previous_page", "Prev Page"),
         ("G", "cursor_bottom", "Bottom"),
         ("ctrl+p", "enter_palette_mode", "Palette"),
+        ("ctrl+d", "scroll_down", "Scroll Down"),
+        ("ctrl+u", "scroll_up", "Scroll Up"),
         ("a", "add_connection", "Add Connection"),
         ("w", "enter_where_mode", "Where"),
         ("o", "enter_order_mode", "Order"),
@@ -235,6 +260,7 @@ class DatabaseBrowserApp(App):
         self._page_turn_block_until = 0.0
         self._last_g_pressed_at = 0.0
         self._gg_timeout_seconds = 0.4
+        self._current_message = ""
         self._selection_mode = ""
         self._selection_anchor = Coordinate(0, 0)
         self._rows_column_widths: list[int] = []
@@ -262,26 +288,34 @@ class DatabaseBrowserApp(App):
         with Vertical():
             with Horizontal(id="top-bar"):
                 yield Static(self._status_text(), id="selected-status")
-                yield Static("", id="loading-indicator")
-            yield Static("", id="message-line")
             keybinds = KeyBindingBar()
             keybinds.id = "keybinds-bar"
             yield keybinds
-            yield Static(self._where_text(), id="where-bar")
-            yield Static(self._order_text(), id="order-bar")
             with Horizontal(id="input-bar"):
                 yield Static("", id="input-prefix")
                 yield Input(placeholder="Command", id="command-input")
+            yield Static("", id="message-line")
+            with Horizontal(id="view-bar"):
+                yield Static("", id="view-bar-left")
+                yield Static("", id="view-bar-text")
+                yield Static("", id="loading-indicator")
+            yield Static(self._where_text(), id="where-bar")
+            yield Static(self._order_text(), id="order-bar")
             yield ListView(id="resource-list")
             yield DataTable(id="rows-table")
 
     async def on_mount(self) -> None:
         await self._refresh_view()
+        self._update_status()
         self._resource_list_view().focus()
         rows_table = self.query_one("#rows-table", DataTable)
         rows_table.display = False
         command_input = self.query_one("#command-input", Input)
         command_input.display = False
+        input_bar = self.query_one("#input-bar", Horizontal)
+        input_bar.display = False
+        message_line = self.query_one("#message-line", Static)
+        message_line.display = True
         self._update_keybinds()
         if self._connections and self._initial_connection_name:
             await self._apply_initial_selection()
@@ -362,6 +396,24 @@ class DatabaseBrowserApp(App):
         self._rows_table_view().action_cursor_right()
         self._refresh_rows_selection()
 
+    def action_scroll_down(self) -> None:
+        if self._input_mode:
+            return
+        if self._current_view == "rows":
+            self._page_cursor_rows(direction=1)
+            self._refresh_rows_selection()
+            return
+        self._page_cursor_list(direction=1)
+
+    def action_scroll_up(self) -> None:
+        if self._input_mode:
+            return
+        if self._current_view == "rows":
+            self._page_cursor_rows(direction=-1)
+            self._refresh_rows_selection()
+            return
+        self._page_cursor_list(direction=-1)
+
     def action_cursor_bottom(self) -> None:
         if self._input_mode:
             return
@@ -435,6 +487,47 @@ class DatabaseBrowserApp(App):
         self._page_turn_block_until = now + self._page_turn_cooldown_seconds
         return True
 
+    def _page_cursor_rows(self, *, direction: int) -> None:
+        rows_table = self._rows_table_view()
+        if rows_table.row_count == 0:
+            return
+        height = rows_table.scrollable_content_region.height
+        if rows_table.show_header:
+            height -= rows_table.header_height
+        if height <= 0:
+            return
+        row_index, column_index = rows_table.cursor_coordinate
+        offset = 0
+        rows_to_scroll = 0
+        if direction > 0:
+            rows = rows_table.ordered_rows[row_index:]
+        else:
+            rows = rows_table.ordered_rows[: row_index + 1]
+        for ordered_row in rows:
+            offset += ordered_row.height
+            rows_to_scroll += 1
+            if offset > height:
+                break
+        if rows_to_scroll == 0:
+            return
+        if direction > 0:
+            target_row = min(rows_table.row_count - 1, row_index + rows_to_scroll - 1)
+        else:
+            target_row = max(0, row_index - rows_to_scroll + 1)
+        rows_table.move_cursor(row=target_row, column=column_index, animate=False)
+
+    def _page_cursor_list(self, *, direction: int) -> None:
+        resource_list = self._resource_list_view()
+        item_count = len(resource_list.children)
+        if item_count == 0:
+            return
+        page_size = max(1, resource_list.size.height - 1)
+        index = resource_list.index or 0
+        if direction > 0:
+            resource_list.index = min(item_count - 1, index + page_size)
+        else:
+            resource_list.index = max(0, index - page_size)
+
     async def action_escape(self) -> None:
         if self._input_mode:
             self._close_input_mode()
@@ -455,6 +548,7 @@ class DatabaseBrowserApp(App):
         if event.input.id != "command-input":
             return
         submitted_value = event.value.strip()
+        before_message = self._current_message
         try:
             if self._input_mode == "filter":
                 await self._apply_filter(submitted_value)
@@ -465,7 +559,10 @@ class DatabaseBrowserApp(App):
             elif self._input_mode in {"command", "palette"}:
                 await self._run_command(submitted_value)
         finally:
-            self._close_input_mode()
+            keep_message = (
+                self._current_message != "" and self._current_message != before_message
+            )
+            self._close_input_mode(keep_message=keep_message)
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "resource-list":
@@ -531,24 +628,32 @@ class DatabaseBrowserApp(App):
         connection_text = self._selected_connection_name or "<none>"
         database_text = self._selected_database_name or "<none>"
         schema_text = self._selected_schema_name or "<none>"
-        table_text = self._selected_table_name or "<none>"
-        page_text = ""
+        row_page_text = ""
         if self._current_view == "rows":
-            page_number = (self._rows_page_offset // self._rows_page_limit) + 1
-            page_text = f" | page: {page_number} ({self._rows_page_limit}/page)"
-            if self._rows_where_clause:
-                page_text += f" | where: {self._rows_where_clause}"
-            if self._rows_order_by_clause:
-                page_text += f" | order: {self._rows_order_by_clause}"
-        filter_text = ""
-        active_filter = self._resource_filters.get(self._current_view, "")
-        if active_filter and self._current_view != "rows":
-            filter_text = f" | filter: {active_filter}"
+            row_page_text = f" | {self._rows_page_limit}/page"
         return (
-            f"View: {self._current_view} | Connection: {connection_text} | "
-            f"db: {database_text} | schema: {schema_text} | table: {table_text}"
-            f"{page_text}{filter_text}"
+            f"Connection: {connection_text} | db: {database_text} | schema: {schema_text}"
+            f"{row_page_text}"
         )
+
+    def _view_bar_text(self) -> str:
+        if self._current_view == "connection":
+            return "Connections"
+        if self._current_view == "database":
+            connection_text = self._selected_connection_name or "<none>"
+            return f"Databases ({connection_text})"
+        if self._current_view == "schema":
+            database_text = self._selected_database_name or "<none>"
+            return f"Schemas ({database_text})"
+        if self._current_view == "table":
+            database_text = self._selected_database_name or "<none>"
+            schema_text = self._selected_schema_name or "<none>"
+            return f"Tables ({database_text}/{schema_text})"
+        if self._current_view == "rows":
+            table_text = self._selected_table_name or "<none>"
+            page_number = (self._rows_page_offset // self._rows_page_limit) + 1
+            return f"Table Row Data ({table_text}) Page {page_number}"
+        return ""
 
     def _where_text(self) -> str:
         if not self._rows_where_clause:
@@ -563,9 +668,12 @@ class DatabaseBrowserApp(App):
     def _update_status(self) -> None:
         status = self.query_one("#selected-status", Static)
         status.update(self._status_text())
+        view_bar = self.query_one("#view-bar-text", Static)
+        view_bar.update(self._view_bar_text())
 
     def _update_message(self, message: str) -> None:
         message_line = self.query_one("#message-line", Static)
+        self._current_message = message
         message_line.update(message)
 
     def _update_keybinds(self) -> None:
@@ -643,6 +751,7 @@ class DatabaseBrowserApp(App):
         self._selected_table_name = resource_list.highlighted_child.table_name
         self._rows_page_offset = 0
         self._rows_order_by_clause = ""
+        self._rows_where_clause = ""
         self._clear_selection()
         self._update_status()
         self._show_rows_loading_state()
@@ -739,6 +848,8 @@ class DatabaseBrowserApp(App):
         self._input_mode = mode
         command_input = self.query_one("#command-input", Input)
         input_prefix = self.query_one("#input-prefix", Static)
+        input_bar = self.query_one("#input-bar", Horizontal)
+        message_line = self.query_one("#message-line", Static)
         if mode == "filter":
             command_input.placeholder = "Filter"
             input_prefix.update("/")
@@ -766,6 +877,8 @@ class DatabaseBrowserApp(App):
             command_input.value = ""
         command_input.select_on_focus = False
         self._set_input_cursor_to_end(command_input)
+        input_bar.display = True
+        message_line.display = False
         command_input.display = True
         input_prefix.display = True
         command_input.focus()
@@ -787,19 +900,24 @@ class DatabaseBrowserApp(App):
             self._update_message("COMMAND:")
         self._update_keybinds()
 
-    def _close_input_mode(self) -> None:
+    def _close_input_mode(self, *, keep_message: bool = False) -> None:
         command_input = self.query_one("#command-input", Input)
         input_prefix = self.query_one("#input-prefix", Static)
+        input_bar = self.query_one("#input-bar", Horizontal)
+        message_line = self.query_one("#message-line", Static)
         command_input.display = False
         command_input.value = ""
         input_prefix.update("")
         input_prefix.display = False
+        input_bar.display = False
+        message_line.display = True
         self._input_mode = ""
         if self._current_view == "rows":
             self._rows_table_view().focus()
         else:
             self._resource_list_view().focus()
-        self._update_message("")
+        if not keep_message:
+            self._update_message("")
         self._update_keybinds()
 
     async def _apply_filter(self, filter_text: str) -> None:
@@ -831,6 +949,9 @@ class DatabaseBrowserApp(App):
         if command_text in {"q", "quit", "exit"}:
             self.exit()
             return
+        if command_text in {"halp", "help", "?"}:
+            self._show_help_command()
+            return
         if not command_text:
             self._update_message("")
             return
@@ -839,6 +960,19 @@ class DatabaseBrowserApp(App):
         if await self._handle_page_size_command(command_text):
             return
         self._update_message(f"Unknown command: {command_text}")
+
+    def _show_help_command(self) -> None:
+        commands = [
+            "connection | connections | conn",
+            "db | database | databases",
+            "schema | schemas",
+            "table | tables",
+            "rows | data",
+            "pagesize <N>",
+            "halp | help | ?",
+            "q | quit | exit",
+        ]
+        self._update_message("Commands: " + " · ".join(commands))
 
     async def _handle_focus_command(self, command_text: str) -> bool:
         normalized = command_text.strip().lower()
@@ -1021,7 +1155,9 @@ class DatabaseBrowserApp(App):
             max_cell_width = len(column_name)
             for formatted_row in formatted_rows:
                 if column_index < len(formatted_row):
-                    max_cell_width = max(max_cell_width, len(formatted_row[column_index]))
+                    max_cell_width = max(
+                        max_cell_width, len(formatted_row[column_index])
+                    )
             column_widths.append(min(max_cell_width, self._max_table_cell_width))
         self._rows_column_widths = column_widths
         for column_name, width in zip(row_page.columns, column_widths, strict=False):
@@ -1265,7 +1401,7 @@ class DatabaseBrowserApp(App):
         if self._input_mode == "filter":
             return [("enter", "Apply"), ("esc", "Cancel")]
 
-        base = [("q", "Quit"), (":", "Command"), ("esc", "Back")]
+        base = [(":", "Command"), ("esc", "Back")]
         movement = [("j/k", "Move"), ("gg", "Top"), ("G", "Bottom")]
 
         if self._current_view == "rows":
@@ -1283,17 +1419,27 @@ class DatabaseBrowserApp(App):
                     ("y", "Yank"),
                     ("n/p", "Page"),
                 ]
-                + [("^p", "Palette")]
+                + [("^p", "Palette"), (":q", "Quit")]
             )
 
         if self._current_view == "connection":
             return (
                 base
                 + movement
-                + [("a", "Add"), ("/", "Filter"), ("enter", "Select"), ("^p", "Palette")]
+                + [
+                    ("a", "Add"),
+                    ("/", "Filter"),
+                    ("enter", "Select"),
+                    ("^p", "Palette"),
+                    (":q", "Quit"),
+                ]
             )
 
-        return base + movement + [("/", "Filter"), ("enter", "Select"), ("^p", "Palette")]
+        return (
+            base
+            + movement
+            + [("/", "Filter"), ("enter", "Select"), ("^p", "Palette"), (":q", "Quit")]
+        )
 
     def _format_cell_value(self, value: object) -> str:
         if isinstance(value, (dict, list)):
