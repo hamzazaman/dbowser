@@ -113,14 +113,14 @@ class CellDetailScreen(ModalScreen[None]):
         with Vertical():
             with Horizontal(id="top-bar"):
                 yield Static(self._status_text, id="selected-status")
-            with Horizontal(id="view-bar"):
-                yield Static("", id="view-bar-left")
-                yield Static(self._view_text, id="view-bar-text")
-                yield Static("", id="loading-indicator")
             keybinds = KeyBindingBar()
             keybinds.id = "keybinds-bar"
             keybinds.update("[bold cyan]y[/] Yank  [bold cyan]esc[/] Back")
             yield keybinds
+            with Horizontal(id="view-bar"):
+                yield Static("", id="view-bar-left")
+                yield Static(self._view_text, id="view-bar-text")
+                yield Static("", id="loading-indicator")
             with VerticalScroll():
                 yield Static(self._cell_text, id="cell-detail-text")
 

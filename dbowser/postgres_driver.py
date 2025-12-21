@@ -10,6 +10,7 @@ from asyncpg.pool import PoolConnectionProxy
 
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_QUERY_START_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 4
 
@@ -224,6 +225,34 @@ async def list_rows(
         f'SELECT * FROM "{schema_name}"."{table_name}"'
         f"{where_sql}{order_sql} LIMIT $1 OFFSET $2"
     )
+    async with _acquire_connection(connection_parameters) as connection:
+        statement = await connection.prepare(query)
+        columns = [attribute.name for attribute in statement.get_attributes()]
+        records = await statement.fetch(limit + 1, offset)
+    has_more = len(records) > limit
+    trimmed_records = records[:limit]
+    rows = [tuple(record) for record in trimmed_records]
+    return RowPage(
+        columns=columns,
+        rows=rows,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
+
+
+async def run_query(
+    connection_parameters: ConnectionParameters,
+    query_text: str,
+    limit: int,
+    offset: int,
+) -> RowPage:
+    normalized = query_text.strip().rstrip(";")
+    if not normalized:
+        raise ValueError("Query is empty.")
+    if not _QUERY_START_RE.match(normalized):
+        raise ValueError("Only SELECT queries are supported.")
+    query = f"SELECT * FROM ({normalized}) AS query_result LIMIT $1 OFFSET $2"
     async with _acquire_connection(connection_parameters) as connection:
         statement = await connection.prepare(query)
         columns = [attribute.name for attribute in statement.get_attributes()]
