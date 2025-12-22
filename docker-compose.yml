@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: dbowser
+      POSTGRES_PASSWORD: dbowser
+      POSTGRES_DB: dbowser_test
+    ports:
+      - "54329:5432"
+    volumes:
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro

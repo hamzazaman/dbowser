@@ -111,6 +111,13 @@ async def _get_pool(connection_parameters: ConnectionParameters) -> Pool:
     return pool
 
 
+async def close_pools() -> None:
+    pools = list(_pools.values())
+    _pools.clear()
+    for pool in pools:
+        await pool.close()
+
+
 @asynccontextmanager
 async def _acquire_connection(
     connection_parameters: ConnectionParameters,
