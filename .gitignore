@@ -23,6 +23,7 @@ package.json
 tessdata_fast-main/
 tags
 *.egg-info/
+.vhs-home/
 
 # Ignore the .idea/ directory (PyCharm project files)
 .idea/

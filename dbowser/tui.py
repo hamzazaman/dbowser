@@ -1107,6 +1107,10 @@ class DatabaseBrowserApp(App):
 
     async def _apply_filter(self, filter_text: str) -> None:
         self._resource_filters[self._current_view] = filter_text
+        if filter_text:
+            self._update_message(f"Filter: {filter_text}")
+        else:
+            self._update_message("Filter cleared.")
         self._update_status()
         await self._refresh_view()
 
@@ -1326,6 +1330,7 @@ class DatabaseBrowserApp(App):
             return
         self._view_history.append(self._current_view)
         self._current_view = target_view
+        self._update_message("")
         self._update_status()
         await self._refresh_view()
         self._update_keybinds()
@@ -1337,6 +1342,7 @@ class DatabaseBrowserApp(App):
         if previous_view == self._current_view:
             return
         self._current_view = previous_view
+        self._update_message("")
         self._update_status()
         await self._refresh_view()
         self._update_keybinds()

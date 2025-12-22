@@ -26,7 +26,12 @@ INSERT INTO widgets (name, quantity)
 VALUES
     ('alpha', 3),
     ('beta', 7),
-    ('gamma', 0);
+    ('gamma', 0),
+    ('delta', 12),
+    ('epsilon', 5),
+    ('zeta', 2),
+    ('eta', 0),
+    ('theta', 9);
 
 INSERT INTO gadgets (label)
 VALUES
@@ -37,7 +42,10 @@ INSERT INTO widget_events (widget_id, event_type)
 VALUES
     (1, 'created'),
     (1, 'inspected'),
-    (2, 'created');
+    (2, 'created'),
+    (4, 'created'),
+    (4, 'shipped'),
+    (6, 'created');
 
 INSERT INTO long_texts (note)
 VALUES

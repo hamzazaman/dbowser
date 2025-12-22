@@ -84,7 +84,16 @@ async def _seed_integration_data(db_url: str) -> None:
         )
         await connection.executemany(
             "INSERT INTO public.widgets (name, quantity) VALUES ($1, $2)",
-            [("alpha", 3), ("beta", 7), ("gamma", 0)],
+            [
+                ("alpha", 3),
+                ("beta", 7),
+                ("gamma", 0),
+                ("delta", 12),
+                ("epsilon", 5),
+                ("zeta", 2),
+                ("eta", 0),
+                ("theta", 9),
+            ],
         )
         await connection.executemany(
             "INSERT INTO public.gadgets (label) VALUES ($1)",
@@ -92,7 +101,14 @@ async def _seed_integration_data(db_url: str) -> None:
         )
         await connection.executemany(
             "INSERT INTO public.widget_events (widget_id, event_type) VALUES ($1, $2)",
-            [(1, "created"), (1, "inspected"), (2, "created")],
+            [
+                (1, "created"),
+                (1, "inspected"),
+                (2, "created"),
+                (4, "created"),
+                (4, "shipped"),
+                (6, "created"),
+            ],
         )
         await connection.execute(
             "INSERT INTO public.long_texts (note) VALUES ($1)",
