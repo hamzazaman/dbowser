@@ -24,6 +24,7 @@ tessdata_fast-main/
 tags
 *.egg-info/
 .vhs-home/
+build/
 
 # Ignore the .idea/ directory (PyCharm project files)
 .idea/

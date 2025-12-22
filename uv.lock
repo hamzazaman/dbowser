@@ -62,21 +62,26 @@ wheels = [
 [[package]]
 name = "dbowser"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
+    { name = "textual" },
+]
+
+[package.optional-dependencies]
+dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "textual" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
-    { name = "pytest", specifier = ">=7.4.0" },
-    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
     { name = "textual", specifier = ">=0.86.0" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "iniconfig"

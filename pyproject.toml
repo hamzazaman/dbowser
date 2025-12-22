@@ -7,9 +7,20 @@ requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.29.0",
     "textual>=0.86.0",
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
 ]
 
 [project.scripts]
 dbowser = "dbowser.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["dbowser"]
