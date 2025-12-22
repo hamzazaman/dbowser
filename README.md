@@ -4,8 +4,6 @@ Terminal UI for browsing PostgreSQL databases, inspired by DBeaver and k9s. Focu
 
 ![dbowser demo](assets/dbowser-demo.gif)
 
-## Usage
-
 ## Installation
 
 With pip:
@@ -25,6 +23,8 @@ With uv:
 ```bash
 uv tool install .
 ```
+
+## Usage
 
 Add a connection (saved under `~/.config/.dbowser/connections.json`):
 
