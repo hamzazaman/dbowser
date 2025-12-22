@@ -2,6 +2,8 @@
 
 Terminal UI for browsing PostgreSQL databases, inspired by DBeaver and k9s. Focused on fast navigation, familiar k9s-style keybindings, and a clean, glanceable layout.
 
+![dbowser demo](assets/dbowser-demo.gif)
+
 ## Usage
 
 Add a connection (saved under `~/.config/.dbowser/connections.json`):
