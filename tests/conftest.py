@@ -19,6 +19,13 @@ if True:
     from dbowser.postgres_driver import close_pools
 
 
+LONG_TEXT_VALUE = (
+    "This is a deliberately long cell value used to validate column truncation "
+    "behavior in the rows view while preserving the full value in the cell detail "
+    "screen."
+)
+
+
 def _database_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.path:
@@ -38,10 +45,58 @@ async def _seed_integration_data(db_url: str) -> None:
             )
             """
         )
-        await connection.execute("TRUNCATE TABLE public.widgets RESTART IDENTITY")
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.gadgets (
+                id SERIAL PRIMARY KEY,
+                label TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.widget_events (
+                id SERIAL PRIMARY KEY,
+                widget_id INTEGER NOT NULL REFERENCES public.widgets (id),
+                event_type TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.long_texts (
+                id SERIAL PRIMARY KEY,
+                note TEXT NOT NULL
+            )
+            """
+        )
+        await connection.execute(
+            """
+            TRUNCATE TABLE
+                public.widget_events,
+                public.widgets,
+                public.gadgets,
+                public.long_texts
+            RESTART IDENTITY CASCADE
+            """
+        )
         await connection.executemany(
             "INSERT INTO public.widgets (name, quantity) VALUES ($1, $2)",
             [("alpha", 3), ("beta", 7), ("gamma", 0)],
+        )
+        await connection.executemany(
+            "INSERT INTO public.gadgets (label) VALUES ($1)",
+            [("flux capacitor",), ("optical spanner",)],
+        )
+        await connection.executemany(
+            "INSERT INTO public.widget_events (widget_id, event_type) VALUES ($1, $2)",
+            [(1, "created"), (1, "inspected"), (2, "created")],
+        )
+        await connection.execute(
+            "INSERT INTO public.long_texts (note) VALUES ($1)",
+            LONG_TEXT_VALUE,
         )
     finally:
         await connection.close()
