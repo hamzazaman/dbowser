@@ -9,7 +9,6 @@ from asyncpg import Connection, Pool
 from asyncpg.pool import PoolConnectionProxy
 
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _QUERY_START_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 4
@@ -83,9 +82,11 @@ def parse_connection_parameters(connection_url: str) -> ConnectionParameters:
     return _parse_connection_parameters(connection_url)
 
 
-def _validate_identifier(name: str, label: str) -> None:
-    if not _IDENTIFIER_RE.match(name):
-        raise ValueError(f"Invalid {label} identifier: {name}")
+def _quote_identifier(identifier: str) -> str:
+    if not identifier:
+        raise ValueError("Identifier cannot be empty.")
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
 
 
 async def _init_connection(connection: Connection) -> None:
@@ -224,12 +225,12 @@ async def list_rows(
     where_clause: str,
     order_by_clause: str,
 ) -> RowPage:
-    _validate_identifier(schema_name, "schema")
-    _validate_identifier(table_name, "table")
+    schema_identifier = _quote_identifier(schema_name)
+    table_identifier = _quote_identifier(table_name)
     where_sql = f" WHERE {where_clause}" if where_clause else ""
     order_sql = f" ORDER BY {order_by_clause}" if order_by_clause else ""
     query = (
-        f'SELECT * FROM "{schema_name}"."{table_name}"'
+        f"SELECT * FROM {schema_identifier}.{table_identifier}"
         f"{where_sql}{order_sql} LIMIT $1 OFFSET $2"
     )
     async with _acquire_connection(connection_parameters) as connection:

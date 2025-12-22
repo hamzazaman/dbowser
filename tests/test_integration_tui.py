@@ -139,6 +139,44 @@ async def test_table_view_after_initial_schema(
 
 
 @pytest.mark.asyncio
+async def test_table_with_odd_name_loads_rows(
+    app_config, db_url: str, database_name: str
+) -> None:
+    await wait_for_db(db_url)
+    app = DatabaseBrowserApp(
+        app_config,
+        initial_connection_name="local",
+        initial_database_name=database_name,
+        initial_schema_name="public",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _wait_for(lambda: app._current_view == "table")
+        await _wait_for(lambda: len(_resource_list(app).children) > 0)
+        resource_list = _resource_list(app)
+        table_items = [
+            child for child in resource_list.children if isinstance(child, TableListItem)
+        ]
+        odd_table_index = next(
+            (
+                index
+                for index, item in enumerate(table_items)
+                if item.table_name == "Odd Table"
+            ),
+            None,
+        )
+        assert odd_table_index is not None
+        resource_list.index = odd_table_index
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_for(lambda: app._current_view == "rows")
+        await _wait_for(lambda: app._rows_table_view().row_count > 0)
+        assert "Odd Column" in app._rows_page.columns
+        column_index = app._rows_page.columns.index("Odd Column")
+        assert app._rows_page.rows[0][column_index] == "odd-row"
+
+
+@pytest.mark.asyncio
 async def test_cell_detail_shows_full_value_and_truncates_in_table(
     app_config, db_url: str, database_name: str
 ) -> None:

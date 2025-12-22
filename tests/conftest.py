@@ -74,11 +74,20 @@ async def _seed_integration_data(db_url: str) -> None:
         )
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS public."Odd Table" (
+                id SERIAL PRIMARY KEY,
+                "Odd Column" TEXT NOT NULL
+            )
+            """
+        )
+        await connection.execute(
+            """
             TRUNCATE TABLE
                 public.widget_events,
                 public.widgets,
                 public.gadgets,
-                public.long_texts
+                public.long_texts,
+                public."Odd Table"
             RESTART IDENTITY CASCADE
             """
         )
@@ -113,6 +122,10 @@ async def _seed_integration_data(db_url: str) -> None:
         await connection.execute(
             "INSERT INTO public.long_texts (note) VALUES ($1)",
             LONG_TEXT_VALUE,
+        )
+        await connection.execute(
+            'INSERT INTO public."Odd Table" ("Odd Column") VALUES ($1)',
+            "odd-row",
         )
     finally:
         await connection.close()
