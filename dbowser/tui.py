@@ -27,6 +27,8 @@ from dbowser.config import (
     AppConfig,
     ConnectionConfig,
     load_last_query,
+    save_last_selection,
+    LastSelection,
     query_path,
     save_config,
     save_last_query,
@@ -279,6 +281,11 @@ class DatabaseBrowserApp(App):
         self._initial_connection_name = initial_connection_name or ""
         self._initial_database_name = initial_database_name or ""
         self._initial_schema_name = initial_schema_name or ""
+        self._last_selection = LastSelection(
+            connection_name="",
+            database_name="",
+            schema_name="",
+        )
         self._databases: list[DatabaseInfo] = []
         self._schemas: list[SchemaInfo] = []
         self._tables: list[TableInfo] = []
@@ -864,6 +871,7 @@ class DatabaseBrowserApp(App):
         self._reset_query_state()
         self._clear_selection()
         self._update_status()
+        self._persist_last_selection()
         await self._load_schemas()
         await self._set_view("schema")
 
@@ -875,6 +883,7 @@ class DatabaseBrowserApp(App):
         self._rows_page_offset = 0
         self._clear_selection()
         self._update_status()
+        self._persist_last_selection()
         await self._load_tables()
         await self._set_view("table")
 
@@ -1633,6 +1642,7 @@ class DatabaseBrowserApp(App):
         self._rows_order_by_clause = ""
         self._reset_query_state()
         self._update_status()
+        self._persist_last_selection()
         await self._load_databases()
         await self._set_view("database")
 
@@ -1647,6 +1657,7 @@ class DatabaseBrowserApp(App):
         self._rows_page_offset = 0
         self._reset_query_state()
         self._update_status()
+        self._persist_last_selection()
         await self._load_schemas()
         await self._set_view("schema")
 
@@ -1661,8 +1672,20 @@ class DatabaseBrowserApp(App):
         self._selected_table_name = ""
         self._rows_page_offset = 0
         self._update_status()
+        self._persist_last_selection()
         await self._load_tables()
         await self._set_view("table")
+
+    def _persist_last_selection(self) -> None:
+        selection = LastSelection(
+            connection_name=self._selected_connection_name,
+            database_name=self._selected_database_name,
+            schema_name=self._selected_schema_name,
+        )
+        if selection == self._last_selection:
+            return
+        save_last_selection(selection)
+        self._last_selection = selection
 
     def _set_input_cursor_to_end(self, input_field: Input) -> None:
         input_field.cursor_position = len(input_field.value)

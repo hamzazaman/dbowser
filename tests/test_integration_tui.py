@@ -4,7 +4,7 @@ from typing import Callable
 
 import pytest
 from textual.coordinate import Coordinate
-from textual.widgets import ListView
+from textual.widgets import ListView, Static
 
 from dbowser.tui import (
     ConnectionListItem,
@@ -29,9 +29,9 @@ def _resource_list(app: DatabaseBrowserApp) -> ListView:
     return app.query_one("#resource-list", ListView)
 
 
-def _cell_detail_view(app: DatabaseBrowserApp):
+def _cell_detail_view(app: DatabaseBrowserApp) -> Static | None:
     try:
-        return app.screen.query_one("#cell-detail-text")
+        return app.screen.query_one("#cell-detail-text", Static)
     except Exception:
         return None
 

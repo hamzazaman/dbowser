@@ -4,6 +4,7 @@ from dbowser.config import (
     add_connection,
     ConnectionConfig,
     load_config,
+    load_last_selection,
     save_config,
 )
 from dbowser.tui import DatabaseBrowserApp
@@ -34,11 +35,12 @@ def main() -> None:
         return
 
     config = load_config()
+    last_selection = load_last_selection()
     app = DatabaseBrowserApp(
         config,
-        initial_connection_name=args.conn,
-        initial_database_name=args.db,
-        initial_schema_name=args.schema,
+        initial_connection_name=args.conn or last_selection.connection_name,
+        initial_database_name=args.db or last_selection.database_name,
+        initial_schema_name=args.schema or last_selection.schema_name,
     )
     app.run()
 
