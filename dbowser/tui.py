@@ -751,18 +751,24 @@ class DatabaseBrowserApp(App):
         )
 
     def _view_bar_text(self) -> str:
+        filter_text = self._resource_filters.get(self._current_view, "")
+        filter_suffix = (
+            f"  [bold rgb(255, 170, 90)]/ {filter_text}[/]"
+            if filter_text
+            else ""
+        )
         if self._current_view == "connection":
-            return "Connections"
+            return f"Connections{filter_suffix}"
         if self._current_view == "database":
             connection_text = self._selected_connection_name or "<none>"
-            return f"Databases ({connection_text})"
+            return f"Databases ({connection_text}){filter_suffix}"
         if self._current_view == "schema":
             database_text = self._selected_database_name or "<none>"
-            return f"Schemas ({database_text})"
+            return f"Schemas ({database_text}){filter_suffix}"
         if self._current_view == "table":
             database_text = self._selected_database_name or "<none>"
             schema_text = self._selected_schema_name or "<none>"
-            return f"Tables ({database_text}/{schema_text})"
+            return f"Tables ({database_text}/{schema_text}){filter_suffix}"
         if self._current_view == "rows":
             table_text = self._selected_table_name or "<none>"
             page_number = (self._rows_page_offset // self._rows_page_limit) + 1
@@ -1107,10 +1113,7 @@ class DatabaseBrowserApp(App):
 
     async def _apply_filter(self, filter_text: str) -> None:
         self._resource_filters[self._current_view] = filter_text
-        if filter_text:
-            self._update_message(f"Filter: {filter_text}")
-        else:
-            self._update_message("Filter cleared.")
+        self._update_message("")
         self._update_status()
         await self._refresh_view()
 
@@ -1703,7 +1706,7 @@ class DatabaseBrowserApp(App):
         if not self._resource_filters.get(self._current_view, ""):
             return False
         self._resource_filters[self._current_view] = ""
-        self._update_message("Filter cleared.")
+        self._update_message("")
         self._update_status()
         self._update_keybinds()
         await self._refresh_view()
