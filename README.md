@@ -6,22 +6,18 @@ Terminal UI for browsing PostgreSQL databases, inspired by DBeaver and k9s. Focu
 
 ## Installation
 
-With pip:
+Installation is recommended via [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
-```bash
-pip install .
-```
-
-With pipx:
-
-```bash
-pipx install .
-```
-
-With uv:
+With uv with the repo cloned:
 
 ```bash
 uv tool install .
+```
+
+With uv directly from GitHub:
+
+```bash
+uv tool install git+https://github.com/hamzazaman/dbowser
 ```
 
 ## Usage
