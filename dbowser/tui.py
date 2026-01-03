@@ -337,6 +337,7 @@ class DatabaseBrowserApp(App):
         }
         self._filter_debounce_seconds = 0.1
         self._filter_task: asyncio.Task[None] | None = None
+        self._last_filter_apply_at = 0.0
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -1121,9 +1122,19 @@ class DatabaseBrowserApp(App):
         self._resource_filters[self._current_view] = filter_text
         self._update_message("")
         self._update_status()
+        if self._current_view in {"connection", "database", "schema", "table"}:
+            await self._refresh_resource_list_from_cache()
+            self._update_keybinds()
+            return
         await self._refresh_view()
 
     def _schedule_live_filter(self, filter_text: str) -> None:
+        now = time.monotonic()
+        if now - self._last_filter_apply_at >= self._filter_debounce_seconds:
+            self._cancel_filter_task()
+            self._last_filter_apply_at = now
+            self._filter_task = asyncio.create_task(self._apply_filter(filter_text))
+            return
         self._cancel_filter_task()
         self._filter_task = asyncio.create_task(self._debounced_apply_filter(filter_text))
 
@@ -1140,6 +1151,7 @@ class DatabaseBrowserApp(App):
             return
         if self._input_mode != "filter":
             return
+        self._last_filter_apply_at = time.monotonic()
         await self._apply_filter(filter_text)
 
     async def _apply_where_clause(self, where_clause: str) -> None:
@@ -1356,6 +1368,60 @@ class DatabaseBrowserApp(App):
             query_text.update(self._query_text)
             self._populate_rows_table(self._query_page)
             return
+
+    async def _refresh_resource_list_from_cache(self) -> None:
+        resource_list = self._resource_list_view()
+        await resource_list.clear()
+        if self._current_view == "connection":
+            self._show_resource_list()
+            filtered = self._filter_items(
+                self._connections,
+                self._resource_filters["connection"],
+            )
+            items = [ConnectionListItem(connection.name) for connection in filtered]
+        elif self._current_view == "database":
+            self._show_resource_list()
+            filtered = self._filter_items(
+                self._databases,
+                self._resource_filters["database"],
+            )
+            items = [DatabaseListItem(database.name) for database in filtered]
+        elif self._current_view == "schema":
+            self._show_resource_list()
+            if not self._selected_database_name:
+                self._update_message("Select a database first.")
+                return
+            filtered = self._filter_items(
+                self._schemas,
+                self._resource_filters["schema"],
+            )
+            items = [SchemaListItem(schema.name) for schema in filtered]
+        elif self._current_view == "table":
+            self._show_resource_list()
+            if not self._selected_database_name:
+                self._update_message("Select a database first.")
+                return
+            if not self._selected_schema_name:
+                self._update_message("Select a schema first.")
+                return
+            filtered = self._filter_items(
+                self._tables,
+                self._resource_filters["table"],
+            )
+            items = [
+                TableListItem(
+                    table.name,
+                    table.estimated_rows,
+                )
+                for table in filtered
+            ]
+        else:
+            return
+        if items:
+            await resource_list.extend(items)
+            resource_list.index = 0
+            if not self._input_mode:
+                resource_list.focus()
 
     async def _set_view(self, target_view: str) -> None:
         if target_view == self._current_view:
