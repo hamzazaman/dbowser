@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 import os
@@ -334,6 +335,8 @@ class DatabaseBrowserApp(App):
             "table": "",
             "rows": "",
         }
+        self._filter_debounce_seconds = 0.1
+        self._filter_task: asyncio.Task[None] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -653,6 +656,8 @@ class DatabaseBrowserApp(App):
             return
         if not self._input_mode:
             return
+        if self._input_mode == "filter":
+            self._schedule_live_filter(event.value)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "command-input":
@@ -1094,6 +1099,7 @@ class DatabaseBrowserApp(App):
         input_prefix = self.query_one("#input-prefix", Static)
         input_bar = self.query_one("#input-bar", Horizontal)
         message_line = self.query_one("#message-line", Static)
+        self._cancel_filter_task()
         command_input.display = False
         command_input.value = ""
         input_prefix.update("")
@@ -1116,6 +1122,25 @@ class DatabaseBrowserApp(App):
         self._update_message("")
         self._update_status()
         await self._refresh_view()
+
+    def _schedule_live_filter(self, filter_text: str) -> None:
+        self._cancel_filter_task()
+        self._filter_task = asyncio.create_task(self._debounced_apply_filter(filter_text))
+
+    def _cancel_filter_task(self) -> None:
+        if self._filter_task is None:
+            return
+        self._filter_task.cancel()
+        self._filter_task = None
+
+    async def _debounced_apply_filter(self, filter_text: str) -> None:
+        try:
+            await asyncio.sleep(self._filter_debounce_seconds)
+        except asyncio.CancelledError:
+            return
+        if self._input_mode != "filter":
+            return
+        await self._apply_filter(filter_text)
 
     async def _apply_where_clause(self, where_clause: str) -> None:
         self._rows_where_clause = where_clause
@@ -1246,7 +1271,8 @@ class DatabaseBrowserApp(App):
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
-                resource_list.focus()
+                if not self._input_mode:
+                    resource_list.focus()
             return
         if self._current_view == "database":
             self._show_resource_list()
@@ -1259,7 +1285,8 @@ class DatabaseBrowserApp(App):
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
-                resource_list.focus()
+                if not self._input_mode:
+                    resource_list.focus()
             return
         if self._current_view == "schema":
             self._show_resource_list()
@@ -1276,7 +1303,8 @@ class DatabaseBrowserApp(App):
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
-                resource_list.focus()
+                if not self._input_mode:
+                    resource_list.focus()
             return
         if self._current_view == "table":
             self._show_resource_list()
@@ -1302,7 +1330,8 @@ class DatabaseBrowserApp(App):
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
-                resource_list.focus()
+                if not self._input_mode:
+                    resource_list.focus()
             return
         if self._current_view == "rows":
             self._show_rows_table()
@@ -1357,7 +1386,8 @@ class DatabaseBrowserApp(App):
         resource_list.display = True
         rows_table.display = False
         query_text.display = False
-        resource_list.focus()
+        if not self._input_mode:
+            resource_list.focus()
 
     def _show_rows_table(self) -> None:
         resource_list = self._resource_list_view()
