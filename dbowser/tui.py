@@ -336,6 +336,7 @@ class DatabaseBrowserApp(App):
             "rows": "",
         }
         self._filter_debounce_seconds = 0.1
+        self._filter_large_list_threshold = 200
         self._filter_task: asyncio.Task[None] | None = None
         self._last_filter_apply_at = 0.0
 
@@ -1129,6 +1130,10 @@ class DatabaseBrowserApp(App):
         await self._refresh_view()
 
     def _schedule_live_filter(self, filter_text: str) -> None:
+        if self._active_filter_item_count() >= self._filter_large_list_threshold:
+            self._cancel_filter_task()
+            self._filter_task = asyncio.create_task(self._debounced_apply_filter(filter_text))
+            return
         now = time.monotonic()
         if now - self._last_filter_apply_at >= self._filter_debounce_seconds:
             self._cancel_filter_task()
@@ -1153,6 +1158,17 @@ class DatabaseBrowserApp(App):
             return
         self._last_filter_apply_at = time.monotonic()
         await self._apply_filter(filter_text)
+
+    def _active_filter_item_count(self) -> int:
+        if self._current_view == "connection":
+            return len(self._connections)
+        if self._current_view == "database":
+            return len(self._databases)
+        if self._current_view == "schema":
+            return len(self._schemas)
+        if self._current_view == "table":
+            return len(self._tables)
+        return 0
 
     async def _apply_where_clause(self, where_clause: str) -> None:
         self._rows_where_clause = where_clause
