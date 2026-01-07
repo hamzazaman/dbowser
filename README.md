@@ -46,6 +46,7 @@ dbowser --conn prod --db mydb --schema public
 - `:` command mode, `/` filter (not in rows view)
 - `w` edit WHERE, `o` edit ORDER BY (rows view)
 - `n/p` next/previous page (rows view)
+- type a line number, then `G` to jump to that line
 
 ### Commands
 

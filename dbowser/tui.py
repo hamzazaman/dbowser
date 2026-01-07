@@ -57,27 +57,32 @@ from dbowser.postgres_driver import (
 
 
 class DatabaseListItem(ListItem):
-    def __init__(self, database_name: str) -> None:
-        super().__init__(Static(database_name))
+    def __init__(self, database_name: str, display_label: Text) -> None:
+        super().__init__(Static(display_label))
         self.database_name = database_name
 
 
 class SchemaListItem(ListItem):
-    def __init__(self, schema_name: str) -> None:
-        super().__init__(Static(schema_name))
+    def __init__(self, schema_name: str, display_label: Text) -> None:
+        super().__init__(Static(display_label))
         self.schema_name = schema_name
 
 
 class TableListItem(ListItem):
-    def __init__(self, table_name: str, estimated_rows: int) -> None:
-        label = f"{table_name}  (~{estimated_rows})"
-        super().__init__(Static(label))
+    def __init__(
+        self,
+        table_name: str,
+        estimated_rows: int,
+        display_label: Text,
+    ) -> None:
+        super().__init__(Static(display_label))
         self.table_name = table_name
+        self.estimated_rows = estimated_rows
 
 
 class ConnectionListItem(ListItem):
-    def __init__(self, connection_name: str) -> None:
-        super().__init__(Static(connection_name))
+    def __init__(self, connection_name: str, display_label: Text) -> None:
+        super().__init__(Static(display_label))
         self.connection_name = connection_name
 
 
@@ -302,6 +307,10 @@ class DatabaseBrowserApp(App):
         self._page_turn_block_until = 0.0
         self._last_g_pressed_at = 0.0
         self._gg_timeout_seconds = 0.4
+        self._jump_line_buffer = ""
+        self._jump_line_timeout_seconds = 1.5
+        self._jump_line_last_key_at = 0.0
+        self._suppress_next_cursor_bottom = False
         self._current_message = ""
         self._selection_mode = ""
         self._selection_anchor = Coordinate(0, 0)
@@ -427,7 +436,9 @@ class DatabaseBrowserApp(App):
         await self._open_query_in_editor()
         self._query_text = load_last_query()
         self._query_page_offset = 0
-        self._query_text_view().update(self._query_text)
+        self._query_text_view().update(
+            self._format_text_with_line_numbers(self._query_text)
+        )
         self._update_status()
 
     async def action_run_query(self) -> None:
@@ -443,7 +454,9 @@ class DatabaseBrowserApp(App):
         if not self._query_text.strip():
             self._update_message("Query is empty.")
             return
-        self._query_text_view().update(self._query_text)
+        self._query_text_view().update(
+            self._format_text_with_line_numbers(self._query_text)
+        )
         self._show_query_loading_state()
         await self._load_query_results()
         self._populate_rows_table(self._query_page)
@@ -506,6 +519,13 @@ class DatabaseBrowserApp(App):
 
     def action_cursor_bottom(self) -> None:
         if self._input_mode:
+            return
+        if self._suppress_next_cursor_bottom:
+            self._suppress_next_cursor_bottom = False
+            return
+        if self._jump_line_buffer:
+            self._jump_to_line(int(self._jump_line_buffer))
+            self._jump_line_buffer = ""
             return
         if self._current_view in {"rows", "query"}:
             rows_table = self._rows_table_view()
@@ -720,6 +740,9 @@ class DatabaseBrowserApp(App):
         self._update_message("Row selection.")
 
     def on_key(self, event: Key) -> None:
+        if self._handle_line_jump_input(event):
+            event.stop()
+            return
         if event.key == "enter":
             if not self._input_mode and self._current_view in {"rows", "query"}:
                 self._show_cell_detail()
@@ -1242,7 +1265,18 @@ class DatabaseBrowserApp(App):
                 self._connections,
                 self._resource_filters["connection"],
             )
-            items = [ConnectionListItem(connection.name) for connection in filtered]
+            line_width = self._line_number_width(len(filtered))
+            items = [
+                ConnectionListItem(
+                    connection.name,
+                    self._format_list_item_label(
+                        line_number,
+                        line_width,
+                        connection.name,
+                    ),
+                )
+                for line_number, connection in enumerate(filtered, start=1)
+            ]
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
@@ -1255,7 +1289,18 @@ class DatabaseBrowserApp(App):
                 self._databases,
                 self._resource_filters["database"],
             )
-            items = [DatabaseListItem(database.name) for database in filtered]
+            line_width = self._line_number_width(len(filtered))
+            items = [
+                DatabaseListItem(
+                    database.name,
+                    self._format_list_item_label(
+                        line_number,
+                        line_width,
+                        database.name,
+                    ),
+                )
+                for line_number, database in enumerate(filtered, start=1)
+            ]
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
@@ -1272,7 +1317,18 @@ class DatabaseBrowserApp(App):
                 self._schemas,
                 self._resource_filters["schema"],
             )
-            items = [SchemaListItem(schema.name) for schema in filtered]
+            line_width = self._line_number_width(len(filtered))
+            items = [
+                SchemaListItem(
+                    schema.name,
+                    self._format_list_item_label(
+                        line_number,
+                        line_width,
+                        schema.name,
+                    ),
+                )
+                for line_number, schema in enumerate(filtered, start=1)
+            ]
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
@@ -1292,13 +1348,17 @@ class DatabaseBrowserApp(App):
                 self._tables,
                 self._resource_filters["table"],
             )
-            items = [
-                TableListItem(
-                    table.name,
-                    table.estimated_rows,
+            line_width = self._line_number_width(len(filtered))
+            items = []
+            for line_number, table in enumerate(filtered, start=1):
+                label = f"{table.name}  (~{table.estimated_rows})"
+                items.append(
+                    TableListItem(
+                        table.name,
+                        table.estimated_rows,
+                        self._format_list_item_label(line_number, line_width, label),
+                    )
                 )
-                for table in filtered
-            ]
             if items:
                 await resource_list.extend(items)
                 resource_list.index = 0
@@ -1324,7 +1384,7 @@ class DatabaseBrowserApp(App):
                 return
             self._query_text = load_last_query()
             query_text = self._query_text_view()
-            query_text.update(self._query_text)
+            query_text.update(self._format_text_with_line_numbers(self._query_text))
             self._populate_rows_table(self._query_page)
             return
 
@@ -1379,6 +1439,7 @@ class DatabaseBrowserApp(App):
 
     def _populate_rows_table(self, row_page: RowPage) -> None:
         rows_table = self._rows_table_view()
+        rows_table.show_row_labels = True
         rows_table.clear(columns=True)
         if not row_page.columns:
             return
@@ -1398,6 +1459,9 @@ class DatabaseBrowserApp(App):
         self._rows_column_widths = column_widths
         for column_name, width in zip(row_page.columns, column_widths, strict=False):
             rows_table.add_column(column_name, width=width or 1)
+        base_offset = self._line_number_offset_for_page(row_page)
+        last_line_number = base_offset + len(formatted_rows)
+        label_width = self._line_number_width(last_line_number)
         for row_index, formatted_row in enumerate(formatted_rows):
             styled_row = [
                 self._render_table_cell(
@@ -1407,7 +1471,11 @@ class DatabaseBrowserApp(App):
                 )
                 for column_index, cell_text in enumerate(formatted_row)
             ]
-            rows_table.add_row(*styled_row)
+            line_number = base_offset + row_index + 1
+            rows_table.add_row(
+                *styled_row,
+                label=self._format_row_label_number(line_number, label_width),
+            )
         if rows_table.row_count:
             rows_table.move_cursor(row=0, column=0, animate=False)
         self._selection_last_bounds = None
@@ -1782,6 +1850,111 @@ class DatabaseBrowserApp(App):
             + movement
             + [("/", "Filter"), ("enter", "Select"), ("^p", "Palette"), (":q", "Quit")]
         )
+
+    def _line_number_width(self, line_count: int) -> int:
+        return max(1, len(str(max(line_count, 1))))
+
+    def _format_line_number(self, line_number: int, width: int) -> Text:
+        padded = f"{line_number:>{width}}"
+        return Text(padded, style=self._line_number_style())
+
+    def _format_row_label_number(self, line_number: int, width: int) -> Text:
+        return self._format_line_number(line_number, width)
+
+    def _line_number_style(self) -> str:
+        background_color = self._normalize_color_value(
+            self._line_number_background_color()
+        )
+        return f"dim rgb(140,150,160) on {background_color}"
+
+    def _line_number_background_color(self) -> str:
+        variables = self.get_css_variables()
+        return variables.get("secondary-muted", "rgb(20,24,30)")
+
+    def _normalize_color_value(self, value: str) -> str:
+        return (
+            value.replace(", ", ",")
+            .replace(" ,", ",")
+            .replace("( ", "(")
+            .replace(" )", ")")
+        )
+
+    def _format_list_item_label(
+        self,
+        line_number: int,
+        width: int,
+        label: str,
+    ) -> Text:
+        text = Text()
+        text.append_text(self._format_line_number(line_number, width))
+        text.append(" ")
+        text.append(label)
+        return text
+
+    def _format_text_with_line_numbers(self, text: str) -> Text:
+        lines = text.split("\n")
+        width = self._line_number_width(len(lines))
+        numbered_text = Text()
+        for line_number, line in enumerate(lines, start=1):
+            numbered_text.append_text(self._format_line_number(line_number, width))
+            numbered_text.append(" ")
+            numbered_text.append(line)
+            if line_number != len(lines):
+                numbered_text.append("\n")
+        return numbered_text
+
+    def _line_number_offset_for_page(self, row_page: RowPage) -> int:
+        if row_page is self._query_page:
+            return self._query_page_offset
+        return self._rows_page_offset
+
+    def _handle_line_jump_input(self, event: Key) -> bool:
+        if self._input_mode:
+            return False
+        if self._jump_line_buffer:
+            if time.monotonic() - self._jump_line_last_key_at > (
+                self._jump_line_timeout_seconds
+            ):
+                self._jump_line_buffer = ""
+        if event.key.isdigit():
+            self._jump_line_buffer += event.key
+            self._jump_line_last_key_at = time.monotonic()
+            return True
+        if event.key == "G":
+            if not self._jump_line_buffer:
+                return False
+            self._jump_to_line(int(self._jump_line_buffer))
+            self._jump_line_buffer = ""
+            self._suppress_next_cursor_bottom = True
+            return True
+        if self._jump_line_buffer:
+            self._jump_line_buffer = ""
+        return False
+
+    def _jump_to_line(self, line_number: int) -> None:
+        if line_number <= 0:
+            return
+        if self._current_view in {"rows", "query"}:
+            rows_table = self._rows_table_view()
+            if rows_table.row_count == 0:
+                return
+            active_page = self._active_page()
+            base_offset = self._line_number_offset_for_page(active_page)
+            target_row = line_number - base_offset - 1
+            target_row = max(0, min(rows_table.row_count - 1, target_row))
+            rows_table.move_cursor(
+                row=target_row,
+                column=rows_table.cursor_column,
+                animate=False,
+            )
+            if self._selection_mode:
+                self._refresh_rows_selection()
+            return
+        resource_list = self._resource_list_view()
+        item_count = len(resource_list.children)
+        if item_count == 0:
+            return
+        resource_list.index = min(item_count, line_number) - 1
 
     def _format_cell_value(self, value: object) -> str:
         if isinstance(value, (dict, list)):

@@ -1,5 +1,6 @@
 from typing import Protocol, runtime_checkable
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
@@ -122,9 +123,47 @@ class CellDetailScreen(ModalScreen[None]):
                 yield Static(self._view_text, id="view-bar-text")
                 yield Static("", id="loading-indicator")
             with VerticalScroll():
-                yield Static(self._cell_text, id="cell-detail-text")
+                yield Static(self._format_text_with_line_numbers(), id="cell-detail-text")
 
     def action_yank(self) -> None:
         app = self.app
         if isinstance(app, _AppWithClipboard):
             app.copy_text_to_clipboard(self._cell_text)
+
+    def _format_text_with_line_numbers(self) -> Text:
+        lines = self._cell_text.split("\n")
+        width = max(1, len(str(max(len(lines), 1))))
+        numbered_text = Text()
+        line_number_style = self._line_number_style()
+        for line_number, line in enumerate(lines, start=1):
+            padded = f"{line_number:>{width}}"
+            numbered_text.append(
+                padded,
+                style=line_number_style,
+            )
+            numbered_text.append(" ")
+            numbered_text.append(line)
+            if line_number != len(lines):
+                numbered_text.append("\n")
+        return numbered_text
+
+    def _line_number_style(self) -> str:
+        background_color = self._normalize_color_value(
+            self._line_number_background_color()
+        )
+        return f"dim rgb(140,150,160) on {background_color}"
+
+    def _line_number_background_color(self) -> str:
+        app = self.app
+        if hasattr(app, "get_css_variables"):
+            variables = app.get_css_variables()
+            return variables.get("secondary-muted", "rgb(20,24,30)")
+        return "rgb(20,24,30)"
+
+    def _normalize_color_value(self, value: str) -> str:
+        return (
+            value.replace(", ", ",")
+            .replace(" ,", ",")
+            .replace("( ", "(")
+            .replace(" )", ")")
+        )
