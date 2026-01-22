@@ -9,7 +9,6 @@ from asyncpg import Connection, Pool
 from asyncpg.pool import PoolConnectionProxy
 
 
-_QUERY_START_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 4
 
@@ -89,6 +88,58 @@ def _quote_identifier(identifier: str) -> str:
     return f'"{escaped}"'
 
 
+def _strip_leading_query_comments(query_text: str) -> str:
+    remaining_text = query_text
+    while True:
+        stripped = remaining_text.lstrip()
+        if stripped.startswith("--"):
+            newline_index = stripped.find("\n")
+            if newline_index == -1:
+                return ""
+            remaining_text = stripped[newline_index + 1 :]
+            continue
+        if stripped.startswith("/*"):
+            end_index = stripped.find("*/")
+            if end_index == -1:
+                return ""
+            remaining_text = stripped[end_index + 2 :]
+            continue
+        return stripped
+
+
+def _strip_trailing_query_comments(query_text: str) -> str:
+    remaining_text = query_text.rstrip()
+    while True:
+        remaining_text = remaining_text.rstrip()
+        if remaining_text.endswith("*/"):
+            start_index = remaining_text.rfind("/*")
+            if start_index == -1:
+                break
+            remaining_text = remaining_text[:start_index]
+            continue
+        last_newline_index = remaining_text.rfind("\n")
+        last_line = remaining_text[last_newline_index + 1 :]
+        if not last_line.lstrip().startswith("--"):
+            break
+        remaining_text = (
+            remaining_text[:last_newline_index] if last_newline_index != -1 else ""
+        )
+    return remaining_text.rstrip()
+
+
+def _normalize_query_text(query_text: str) -> str:
+    trimmed = query_text.strip()
+    if not trimmed:
+        return ""
+    trimmed = _strip_leading_query_comments(trimmed)
+    trimmed = _strip_trailing_query_comments(trimmed)
+    trimmed = trimmed.rstrip()
+    trimmed = re.sub(r";(?=\s*(--[^\n]*\s*)*$)", "", trimmed)
+    while trimmed.endswith(";"):
+        trimmed = trimmed[:-1].rstrip()
+    return trimmed
+
+
 async def _init_connection(connection: Connection) -> None:
     await connection.execute("SET default_transaction_read_only = on")
     await connection.execute("SET statement_timeout = '10s'")
@@ -128,7 +179,9 @@ async def _acquire_connection(
         yield connection
 
 
-async def _fetch_databases(connection: Connection | PoolConnectionProxy) -> list[DatabaseInfo]:
+async def _fetch_databases(
+    connection: Connection | PoolConnectionProxy,
+) -> list[DatabaseInfo]:
     query = """
         SELECT datname
         FROM pg_database
@@ -164,7 +217,9 @@ async def list_databases(
         return await _fetch_databases(connection)
 
 
-async def _fetch_schemas(connection: Connection | PoolConnectionProxy) -> list[SchemaInfo]:
+async def _fetch_schemas(
+    connection: Connection | PoolConnectionProxy,
+) -> list[SchemaInfo]:
     query = """
         SELECT schema_name
         FROM information_schema.schemata
@@ -255,11 +310,9 @@ async def run_query(
     limit: int,
     offset: int,
 ) -> RowPage:
-    normalized = query_text.strip().rstrip(";")
+    normalized = _normalize_query_text(query_text)
     if not normalized:
         raise ValueError("Query is empty.")
-    if not _QUERY_START_RE.match(normalized):
-        raise ValueError("Only SELECT queries are supported.")
     query = f"SELECT * FROM ({normalized}) AS query_result LIMIT $1 OFFSET $2"
     async with _acquire_connection(connection_parameters) as connection:
         statement = await connection.prepare(query)
