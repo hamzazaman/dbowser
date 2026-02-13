@@ -47,6 +47,7 @@ from dbowser.postgres_driver import (
     SchemaInfo,
     TableInfo,
     build_database_connection_parameters,
+    close_pools,
     list_databases,
     list_rows,
     list_schemas,
@@ -442,8 +443,14 @@ class DatabaseBrowserApp(App):
         self._update_status()
 
     async def action_run_query(self) -> None:
-        if self._input_mode or self._current_view != "query":
+        if self._input_mode:
             return
+
+        # Delegate to refresh in non-query views
+        if self._current_view != "query":
+            await self.action_refresh_connection()
+            return
+
         if not self._selected_database_name:
             self._update_message("Select a database first.")
             return
@@ -462,6 +469,24 @@ class DatabaseBrowserApp(App):
         self._populate_rows_table(self._query_page)
         self._rows_table_view().focus()
         self._update_status()
+
+    async def action_refresh_connection(self) -> None:
+        """Refresh the database connection by closing pools and reloading data."""
+        if self._input_mode:
+            return
+
+        refresh_views = {"rows", "database", "schema", "table"}
+        if self._current_view not in refresh_views:
+            return
+
+        if not self._connection_parameters:
+            self._update_message("No connection selected.")
+            return
+
+        await close_pools()
+        self._update_message("Refreshing connection...")
+        await self._refresh_view()
+        self._update_message("Connection refreshed.")
 
     def action_cursor_down(self) -> None:
         if self._input_mode:
@@ -1806,6 +1831,7 @@ class DatabaseBrowserApp(App):
                     ("n/p", "Page"),
                     ("w", "Where"),
                     ("o", "Order By"),
+                    ("r", "Refresh"),
                     ("v", "Block Select"),
                     ("V", "Row Select"),
                     (":pagesize N", "Rows/Page"),
